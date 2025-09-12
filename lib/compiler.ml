@@ -233,34 +233,29 @@ module ExplicateControl = struct
   type stmt = Return of exp | Assign of string * exp
 
   let order expr =
-    let rec order_inner (name : string option) expr =
+    let rec order_inner (name : string option) expr names =
       match expr with
-      | MonadicRacket.Atm value -> (
-          match name with
-          | Some name -> [ Assign (name, Atm value) ]
-          | None -> [ Return (Atm value) ])
-      | MonadicRacket.BinMinus (lhs, rhs) -> (
-          match name with
-          | Some name -> [ Assign (name, BinMinus (lhs, rhs)) ]
-          | None -> [ Return (BinMinus (lhs, rhs)) ])
-      | MonadicRacket.UnMinus value -> (
-          match name with
-          | Some name -> [ Assign (name, UnMinus value) ]
-          | None -> [ Return (UnMinus value) ])
-      | MonadicRacket.Plus (lhs, rhs) -> (
-          match name with
-          | Some name -> [ Assign (name, Plus (lhs, rhs)) ]
-          | None -> [ Return (Plus (lhs, rhs)) ])
-      | MonadicRacket.Read -> (
-          match name with
-          | Some name -> [ Assign (name, Read) ]
-          | None -> [ Return Read ])
       | MonadicRacket.Let (new_name, value, expr) ->
-          let assignment = order_inner (Some new_name) value in
-          let expr_result = order_inner name expr in
-          List.append assignment expr_result
+          let assignment, names' = order_inner (Some new_name) value names in
+          let expr_result, names'' = order_inner name expr names' in
+          (List.append assignment expr_result, names'')
+      | other -> (
+          let result_expr =
+            match other with
+            | MonadicRacket.Atm value -> Atm value
+            | MonadicRacket.BinMinus (lhs, rhs) -> BinMinus (lhs, rhs)
+            | MonadicRacket.UnMinus value -> UnMinus value
+            | MonadicRacket.Plus (lhs, rhs) -> Plus (lhs, rhs)
+            | _ -> Read
+          in
+          match name with
+          | Some name ->
+              ( [ Assign (name, result_expr) ],
+                if StringMap.mem name names then names
+                else StringMap.add name (StringMap.cardinal names) names )
+          | None -> ([ Return result_expr ], names))
     in
-    order_inner None expr
+    order_inner None expr StringMap.empty
 
   let format statement =
     let format_expr expr =
@@ -279,4 +274,158 @@ module ExplicateControl = struct
     match statement with
     | Return expr -> "return " ^ format_expr expr
     | Assign (name, expr) -> name ^ " = " ^ format_expr expr
+end
+
+module AsmGenerator = struct
+  type reg = X19 | X20 | X21 | X22 | X23 | X24 | X25 | X26 | X27 | X28
+  type atm = Reg of reg | Num of int
+
+  type stmt =
+    | Mov of reg * atm
+    | Add of reg * atm * atm
+    | Sub of reg * atm * atm
+    | Store of int * reg
+    | Load of int * reg
+    | Read of reg
+    | Result of reg
+
+  let compile statements names =
+    let compile_statement statement names =
+      let compile_expr expression names =
+        match expression with
+        | ExplicateControl.Atm atm -> (
+            match atm with
+            | MonadicRacket.Int number -> [ Mov (X19, Num number) ]
+            | MonadicRacket.Var name ->
+                [ Load (StringMap.find name names, X19) ])
+        | ExplicateControl.Read -> [ Read X19 ]
+        | ExplicateControl.UnMinus atm ->
+            [
+              (match atm with
+              | MonadicRacket.Int number -> Mov (X19, Num number)
+              | MonadicRacket.Var name -> Load (StringMap.find name names, X19));
+              Mov (X20, Num 0);
+              Sub (X19, Reg X20, Reg X19);
+            ]
+        | ExplicateControl.BinMinus (lhs, rhs) ->
+            [
+              (match lhs with
+              | MonadicRacket.Int number -> Mov (X20, Num number)
+              | MonadicRacket.Var name -> Load (StringMap.find name names, X20));
+              (match rhs with
+              | MonadicRacket.Int number -> Mov (X21, Num number)
+              | MonadicRacket.Var name -> Load (StringMap.find name names, X21));
+              Sub (X19, Reg X20, Reg X21);
+            ]
+        | ExplicateControl.Plus (lhs, rhs) ->
+            [
+              (match lhs with
+              | MonadicRacket.Int number -> Mov (X20, Num number)
+              | MonadicRacket.Var name -> Load (StringMap.find name names, X20));
+              (match rhs with
+              | MonadicRacket.Int number -> Mov (X21, Num number)
+              | MonadicRacket.Var name -> Load (StringMap.find name names, X21));
+              Add (X19, Reg X20, Reg X21);
+            ]
+      in
+      match statement with
+      | ExplicateControl.Assign (name, expression) ->
+          let prelude = compile_expr expression names in
+          List.append prelude [ Store (StringMap.find name names, X19) ]
+      | ExplicateControl.Return expression ->
+          let prelude = compile_expr expression names in
+          List.append prelude [ Result X19 ]
+    in
+    List.concat
+      (List.map (fun statement -> compile_statement statement names) statements)
+
+  let print_reg register =
+    match register with
+    | X19 -> "x19"
+    | X20 -> "x20"
+    | X21 -> "x21"
+    | X22 -> "x22"
+    | X23 -> "x23"
+    | X24 -> "x24"
+    | X25 -> "x25"
+    | X26 -> "x26"
+    | X27 -> "x27"
+    | X28 -> "x28"
+
+  let print_atm atomic =
+    match atomic with
+    | Num number -> Printf.sprintf "#%d" number
+    | Reg register -> print_reg register
+
+  let format_statement stmt =
+    match stmt with
+    | Mov (register, atomic) ->
+        Printf.sprintf "    mov %s, %s\n" (print_reg register)
+          (print_atm atomic)
+    | Add (dest, lhs, rhs) ->
+        Printf.sprintf "    add %s, %s, %s\n" (print_reg dest) (print_atm lhs)
+          (print_atm rhs)
+    | Sub (dest, lhs, rhs) ->
+        Printf.sprintf "    sub %s, %s, %s\n" (print_reg dest) (print_atm lhs)
+          (print_atm rhs)
+    | Store (index, src) ->
+        Printf.sprintf "    str %s, [sp, #%d]!\n    sub sp, sp, #%d\n"
+          (print_reg src) (index * 8) (index * 8)
+    | Load (index, dest) ->
+        Printf.sprintf "    ldr %s, [sp, #%d]!\n    sub sp, sp, #%d\n"
+          (print_reg dest) (index * 8) (index * 8)
+    | Read dest ->
+        Printf.sprintf
+          "\n\
+          \    adrp x0, template@PAGE\n\
+          \    add x0, x0, template@PAGEOFF\n\
+          \    adrp x11, num@PAGE\n\
+          \    add x11, x11, num@PAGEOFF\n\
+          \    str x11, [SP, #-16]!\n\
+          \    bl _scanf\n\
+          \    add sp, sp, #16\n\
+          \    adrp x10, num@PAGE\n\
+          \    add x10, x10, num@PAGEOFF\n\
+          \    ldr %s, [x10]\n"
+          (print_reg dest)
+    | Result src ->
+        Printf.sprintf
+          "\n\
+          \    ADRP X0, message@PAGE\n\
+          \    ADD X0, X0, message@PAGEOFF\n\
+          \    STR %s, [SP, #-16]!\n\
+          \    BL  _printf\n\
+          \    ADD SP, SP, #16\n"
+          (print_reg src)
+
+  let compile_format statements names =
+    let logic =
+      String.concat "" (List.map format_statement (compile statements names))
+    in
+    let prelude =
+      ".global _main\n.align 4\n\n_main:\n    stp x29, x30, [SP, #-16]!\n"
+    in
+    let shift = StringMap.cardinal names * 8 in
+    let aligned_shift = if shift mod 16 == 8 then shift + 8 else shift in
+    let memory_allocation =
+      Printf.sprintf "    sub sp, sp, #%d\n" aligned_shift
+    in
+    let memory_deallocation =
+      Printf.sprintf "    add sp, sp, #%d\n" aligned_shift
+    in
+    let epilogue =
+      "\n\
+      \    mov X0, #0\n\
+      \    LDP X29, X30, [SP], #16\n\
+      \    ret\n\n\
+       .data\n\
+       .balign 4\n\
+       message:    .asciz \"Result: %lld\\n\"\n\
+       .balign 4\n\
+       num:    .quad 0\n\
+       .balign 4\n\
+       template:   .asciz \"%lld\"\n"
+    in
+    String.concat "\n"
+      [ prelude; memory_allocation; logic; memory_deallocation; epilogue ]
 end
