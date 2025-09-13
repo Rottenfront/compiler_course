@@ -1,174 +1,253 @@
 open Lexer
 
-type text_position = { line : int; char : int }
-type text_span = text_position * text_position
-type node_info = { position : text_span }
-type substring = { str : string; position : text_span }
+type substring = { str : string; position : position }
+type literal = LitNumber of int | LitBool of bool
 
-type racket_node =
-  | RkValueNumber of node_info * int
-  | RkVar of node_info * string
-  | RkApplication of node_info * application_info
-  (* | RkList of info * racket_node list *)
-  | RkLet of node_info * var_info list * racket_node
+type operator =
+  | OpAdd
+  | OpSub
+  | OpMul
+  | OpDiv
+  | OpEq
+  | OpNe
+  | OpLess
+  | OpGreater
+  | OpLessEq
+  | OpGreaterEq
+  | OpAnd
+  | OpOr
+  | OpXor
 
-and application_info = { name : substring; arguments : racket_node list }
-and var_info = { name : substring; value : racket_node }
+type expr =
+  | TmLiteral of position * literal
+  | TmApplication of position * application_info
+  | TmOpApp of position * operator_info
+  | TmLet of position * var_info * expr
+  | TmIf of position * expr * expr * expr
 
-let default_position = { line = 0; char = 0 }
-let default_info = { position = (default_position, default_position) }
+and application_info = { name : substring; arguments : expr list }
+and var_info = { name : substring; value : expr }
+and operator_info = { lhs : expr; operator : operator; rhs : expr }
 
-let span_from_position (pos : position) : text_span =
-  let start, close = pos.index in
-  ({ line = pos.line; char = start }, { line = pos.line; char = close })
+type declaration = { name : string; types : string list }
 
-let rec parse_racket_expr tokens =
-  let parse_parenth tokens =
-    match tokens with
-    | RkKwLet _ :: rest ->
-        let parse_assignment tokens =
-          match tokens with
-          | RkIdent (pos, str) :: rest ->
-              let node, cs = parse_racket_expr rest in
-              ( {
-                  name = { str; position = span_from_position pos };
-                  value = node;
-                },
-                cs )
-          | _ -> failwith "Unexpected token within assignment"
-        in
-        let rec parse_parenthised_assignments tokens =
-          match tokens with
-          | RkParenOpen _ :: rest -> (
-              let assignment, cs = parse_assignment rest in
-              match cs with
-              | RkParenClose _ :: cs' ->
-                  let arr, cs'' = parse_parenthised_assignments cs' in
-                  (assignment :: arr, cs'')
-              | _ -> failwith "Unexpected token within parenthised assignments")
-          | RkBraceOpen _ :: rest -> (
-              let assignment, cs = parse_assignment rest in
-              match cs with
-              | RkBraceClose _ :: cs' ->
-                  let arr, cs'' = parse_parenthised_assignments cs' in
-                  (assignment :: arr, cs'')
-              | _ -> failwith "Unexpected token within parenthised assignments")
-          | RkBracketOpen _ :: rest -> (
-              let assignment, cs = parse_assignment rest in
-              match cs with
-              | RkBracketClose _ :: cs' ->
-                  let arr, cs'' = parse_parenthised_assignments cs' in
-                  (assignment :: arr, cs'')
-              | _ -> failwith "Unexpected token within parenthised assignments")
-          | _ -> ([], tokens)
-        in
-        let parse_let_assignments tokens =
-          match tokens with
-          | RkParenOpen _ :: rest -> (
-              let assignments, cs = parse_parenthised_assignments rest in
-              match cs with
-              | RkParenClose _ :: cs' -> (assignments, cs')
-              | _ -> failwith "Unexpected token after assignments")
-          | RkBraceOpen _ :: rest -> (
-              let assignments, cs = parse_parenthised_assignments rest in
-              match cs with
-              | RkBraceClose _ :: cs' -> (assignments, cs')
-              | _ -> failwith "Unexpected token after assignments")
-          | RkBracketOpen _ :: rest -> (
-              let assignments, cs = parse_parenthised_assignments rest in
-              match cs with
-              | RkBracketClose _ :: cs' -> (assignments, cs')
-              | _ -> failwith "Unexpected token after assignments")
-          | _ -> failwith "Unexpected token after let"
-        in
-        let assignments, cs = parse_let_assignments rest in
-        let node, cs' = parse_racket_expr cs in
-        (RkLet (default_info, assignments, node), cs')
-    | RkIdent (pos, str) :: rest ->
-        let rec parse_arguments tokens =
-          match tokens with
-          | RkParenClose _ :: _ -> ([], tokens)
-          | RkBraceClose _ :: _ -> ([], tokens)
-          | RkBracketClose _ :: _ -> ([], tokens)
-          | _ ->
-              let node, cs = parse_racket_expr tokens in
-              let next, cs' = parse_arguments cs in
-              (node :: next, cs')
-        in
-        let arguments, cs = parse_arguments rest in
-        ( RkApplication
-            ( default_info,
-              { name = { str; position = span_from_position pos }; arguments }
-            ),
-          cs )
-    | _ -> failwith "Unexpected token in parentheses"
+type implementation = {
+  name : string;
+  parameters : string list;
+  expression : expr;
+}
+
+type statement =
+  | StmtDecl of position * declaration
+  | StmtImpl of position * implementation
+
+let default_char_pos : char_position = { line = 0; char = 0 }
+let default_position : position = (default_char_pos, default_char_pos)
+
+let extend_span ((left, _) : position) ((_, right) : position) : position =
+  (left, right)
+
+let get_position expr =
+  match expr with
+  | TmLiteral (position, _) -> position
+  | TmApplication (position, _) -> position
+  | TmLet (position, _, _) -> position
+  | TmOpApp (position, _) -> position
+  | TmIf (position, _, _, _) -> position
+
+let rec parse_expr tokens is_in_application =
+  let rec parse_application name position arguments tokens =
+    match parse_expr tokens true with
+    | Some expr, rest ->
+        parse_application name
+          (extend_span position (get_position expr))
+          (expr :: arguments) rest
+    | None, rest ->
+        ( Some
+            (TmApplication (position, { name; arguments = List.rev arguments })),
+          rest )
   in
-  match tokens with
-  | [] -> failwith "No input to parse_expr"
-  | RkNumber (pos, value) :: rest ->
-      (RkValueNumber ({ position = span_from_position pos }, value), rest)
-  | RkIdent (pos, ident) :: rest ->
-      (RkVar ({ position = span_from_position pos }, ident), rest)
-  | RkBraceOpen pos :: rest ->
-      let node, cs = parse_parenth rest in
-      let start, _ = span_from_position pos in
-      let (_, close), rest =
-        match cs with
-        | RkBraceClose close_pos :: rest -> (span_from_position close_pos, rest)
-        | [] ->
+  let parse_let tokens position =
+    let name, rest =
+      match tokens with
+      | TkIdent (pos, ident) :: rest -> ({ str = ident; position = pos }, rest)
+      | [] ->
+          failwith
+            (Printf.sprintf "Unexpected end in variable definition (%s)"
+               (print_position position))
+      | tok :: _ ->
+          failwith
+            (Printf.sprintf "Unexpected token in variable definition on %s"
+               (print_position (token_position tok)))
+    in
+    let rest' =
+      match rest with
+      | TkSet _ :: rest' -> rest'
+      | [] ->
+          failwith
+            (Printf.sprintf "Unexpected end in variable definition (%s)"
+               (print_position position))
+      | tok :: _ ->
+          failwith
+            (Printf.sprintf "Unexpected token in variable definition on %s"
+               (print_position (token_position tok)))
+    in
+    let value, position, cs =
+      match parse_expr rest' false with
+      | Some expr, cs -> (expr, extend_span position (get_position expr), cs)
+      | _ ->
+          failwith
+            (Printf.sprintf "Unexpected end in variable definition (%s)"
+               (print_position position))
+    in
+    let position, cs' =
+      match cs with
+      | TkIn tok_pos :: cs' -> (extend_span position tok_pos, cs')
+      | _ ->
+          failwith
+            (Printf.sprintf "Unexpected end in variable definition (%s)"
+               (print_position position))
+    in
+    match parse_expr cs' false with
+    | Some expr, cs'' ->
+        ( Some
+            (TmLet
+               (extend_span position (get_position expr), { name; value }, expr)),
+          cs'' )
+    | None, _ ->
+        failwith
+          (Printf.sprintf "Unexpected end in variable definition (%s)"
+             (print_position position))
+  in
+  let parse_if tokens position =
+    let cond, position, rest =
+      match parse_expr tokens false with
+      | Some cond, rest -> (cond, extend_span position (get_position cond), rest)
+      | None, _ ->
+          failwith
+            (Printf.sprintf "Condition expression expected after if on %s"
+               (print_position position))
+    in
+    let position, rest' =
+      match rest with
+      | TkThen pos :: rest' -> (extend_span position pos, rest')
+      | [] ->
+          failwith
+            (Printf.sprintf "Unexpected end after condition expression (%s)"
+               (print_position position))
+      | tok :: _ ->
+          failwith
+            (Printf.sprintf "Unexpected token after condition on %s"
+               (print_position (token_position tok)))
+    in
+    let if_true, position, cs =
+      match parse_expr rest' false with
+      | Some expr, cs -> (expr, extend_span position (get_position expr), cs)
+      | _ ->
+          failwith
+            (Printf.sprintf "Unexpected end in true branch (%s)"
+               (print_position position))
+    in
+    let position, cs' =
+      match cs with
+      | TkElse pos :: cs' -> (extend_span position pos, cs')
+      | [] ->
+          failwith
+            (Printf.sprintf "Unexpected end after true branch expression (%s)"
+               (print_position position))
+      | tok :: _ ->
+          failwith
+            (Printf.sprintf "Unexpected token after true branch on %s"
+               (print_position (token_position tok)))
+    in
+    match parse_expr cs' false with
+    | Some if_false, cs'' ->
+        ( Some
+            (TmIf
+               ( extend_span position (get_position if_false),
+                 cond,
+                 if_true,
+                 if_false )),
+          cs'' )
+    | None, _ ->
+        failwith
+          (Printf.sprintf "Unexpected end in false branch after %s"
+             (print_position position))
+  in
+  let expr, rest =
+    match tokens with
+    | TkIdent (pos, ident) :: rest ->
+        if is_in_application then
+          ( Some
+              (TmApplication
+                 ( pos,
+                   { name = { str = ident; position = pos }; arguments = [] } )),
+            rest )
+        else parse_application { str = ident; position = pos } pos [] rest
+    | TkNumber (pos, number) :: rest ->
+        (Some (TmLiteral (pos, LitNumber number)), rest)
+    | TkTrue pos :: rest -> (Some (TmLiteral (pos, LitBool true)), rest)
+    | TkFalse pos :: rest -> (Some (TmLiteral (pos, LitBool false)), rest)
+    | TkParenOpen pos :: rest -> (
+        match parse_expr rest false with
+        | expr, TkParenClose _ :: cs -> (expr, cs)
+        | _, _ ->
             failwith
-              (Printf.sprintf "Opened brace at %d:%d" (start.line + 1)
-                 (start.char + 1))
-        | _ -> failwith "Unclosed brace"
-      in
-      let info = { position = (start, close) } in
-      ( (match node with
-        | RkValueNumber (_, value) -> RkValueNumber (info, value)
-        | RkVar (_, value) -> RkVar (info, value)
-        | RkApplication (_, value) -> RkApplication (info, value)
-        | RkLet (_, vars, expr) -> RkLet (info, vars, expr)),
-        rest )
-  | RkBracketOpen pos :: rest ->
-      let node, cs = parse_parenth rest in
-      let start, _ = span_from_position pos in
-      let (_, close), rest =
-        match cs with
-        | RkBracketClose close_pos :: rest ->
-            (span_from_position close_pos, rest)
-        | [] ->
-            failwith
-              (Printf.sprintf "Opened bracket at %d:%d" (start.line + 1)
-                 (start.char + 1))
-        | _ -> failwith "Unclosed bracket"
-      in
-      let info = { position = (start, close) } in
-      ( (match node with
-        | RkValueNumber (_, value) -> RkValueNumber (info, value)
-        | RkVar (_, value) -> RkVar (info, value)
-        | RkApplication (_, value) -> RkApplication (info, value)
-        | RkLet (_, vars, expr) -> RkLet (info, vars, expr)),
-        rest )
-  | RkParenOpen pos :: rest ->
-      let node, cs = parse_parenth rest in
-      let start, _ = span_from_position pos in
-      let (_, close), rest =
-        match cs with
-        | RkParenClose close_pos :: rest -> (span_from_position close_pos, rest)
-        | [] ->
-            failwith
-              (Printf.sprintf "Opened parenthesis at %d:%d" (start.line + 1)
-                 (start.char + 1))
-        | _ -> failwith "Unclosed parenthesis"
-      in
-      let info = { position = (start, close) } in
-      ( (match node with
-        | RkValueNumber (_, value) -> RkValueNumber (info, value)
-        | RkVar (_, value) -> RkVar (info, value)
-        | RkApplication (_, value) -> RkApplication (info, value)
-        | RkLet (_, vars, expr) -> RkLet (info, vars, expr)),
-        rest )
-  | _ -> failwith "Unexpected token"
-
-let racket_parser input =
-  let expr, _ = parse_racket_expr (racket_lexer input) in
-  expr
+              (Printf.sprintf "Unclosed parenthesis on %s" (print_position pos))
+        )
+    | TkIf pos :: rest ->
+        if is_in_application then
+          failwith
+            (Printf.sprintf
+               "Cannot use branching inside of function application (%s)"
+               (print_position pos))
+        else parse_if rest pos
+    | TkLet pos :: rest ->
+        if is_in_application then
+          failwith
+            (Printf.sprintf
+               "Cannot define new variables inside of function application (%s)"
+               (print_position pos))
+        else parse_let rest pos
+    | rest -> (None, rest)
+  in
+  if is_in_application then (expr, rest)
+  else
+    match expr with
+    | Some lhs -> (
+        let parse_rhs lhs rest operator position =
+          match parse_expr rest false with
+          | Some rhs, cs ->
+              ( Some
+                  (TmOpApp
+                     ( extend_span (get_position lhs) (get_position rhs),
+                       { lhs; rhs; operator } )),
+                cs )
+          | None, _ ->
+              failwith
+                (Printf.sprintf "No expression after operator on: %s"
+                   (print_position position))
+        in
+        match rest with
+        | TkAnd pos :: cs -> parse_rhs lhs cs OpAnd pos
+        | TkOr pos :: cs -> parse_rhs lhs cs OpOr pos
+        | TkSet pos :: cs -> parse_rhs lhs cs OpEq pos
+        | TkOperator (pos, op_token) :: cs ->
+            let operator =
+              match op_token with
+              | "+" -> OpAdd
+              | "-" -> OpSub
+              | "*" -> OpMul
+              | "/" -> OpDiv
+              | "!=" -> OpNe
+              | "<" -> OpLess
+              | ">" -> OpGreater
+              | "<=" -> OpLessEq
+              | ">=" -> OpGreaterEq
+              | "||" -> OpOr
+              | "&&" -> OpAnd
+              | _ -> failwith (Printf.sprintf "Unknown operator: %s" op_token)
+            in
+            parse_rhs lhs cs operator pos
+        | _ -> (Some lhs, rest))
+    | None -> (None, rest)
