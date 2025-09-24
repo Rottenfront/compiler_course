@@ -18,6 +18,8 @@ type operator =
   | OpOr
   | OpXor
 
+type type_expr = TyInt of position | TyBool of position | TyUnit of position
+
 type expr =
   | TmLiteral of position * literal
   | TmApplication of position * application_info
@@ -251,3 +253,31 @@ let rec parse_expr tokens is_in_application =
             parse_rhs lhs cs operator pos
         | _ -> (Some lhs, rest))
     | None -> (None, rest)
+
+let parse_type tokens =
+  let rec aux tokens is_between =
+    if is_between then
+      match tokens with
+      | TkArrow _ :: rest -> aux rest false
+      | rest -> ([], rest)
+    else
+      match tokens with
+      | TkIdent (pos, name) :: rest ->
+          let next_types, cs = aux rest true in
+          ( (match name with
+            | "int" -> TyInt pos
+            | "bool" -> TyBool pos
+            | "unit" -> TyUnit pos
+            | _ ->
+                failwith
+                  (Printf.sprintf "Unknown type `%s` on %s" name
+                     (print_position pos)))
+            :: next_types,
+            cs )
+      | [] -> failwith "Unexpected end in type declaration"
+      | tok :: _ ->
+          failwith
+            (Printf.sprintf "Unexpected token on %s"
+               (print_position (token_position tok)))
+  in
+  aux tokens false
