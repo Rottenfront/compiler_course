@@ -2,18 +2,18 @@ open Parser
 open Utils
 
 type racket_clear_node =
-  | RkCVar of string
-  | RkCValueNumber of int
-  | RkCApplication of string * racket_clear_node list
-  | RkCLet of string * racket_clear_node * racket_clear_node
+  | TkCVar of string
+  | TkCValueNumber of int
+  | TkCApplication of string * racket_clear_node list
+  | TkCLet of string * racket_clear_node * racket_clear_node
 
 let uniquify input =
   let rec uniquify_exp count (context : string StringMap.t) (expr : racket_node)
       =
     match expr with
-    | RkVar (_, name) -> (RkCVar (StringMap.find name context), count)
-    | RkValueNumber (_, value) -> (RkCValueNumber value, count)
-    | RkApplication (_, { name = { str = name; position = _ }; arguments }) ->
+    | TkVar (_, name) -> (TkCVar (StringMap.find name context), count)
+    | TkValueNumber (_, value) -> (TkCValueNumber value, count)
+    | TkApplication (_, { name = { str = name; position = _ }; arguments }) ->
         let rec uniquify_all count context exprs =
           match exprs with
           | [] -> ([], count)
@@ -23,8 +23,8 @@ let uniquify input =
               (expr :: exprs, count'')
         in
         let arguments', count' = uniquify_all count context arguments in
-        (RkCApplication (name, arguments'), count')
-    | RkLet (info, vars, expr) -> (
+        (TkCApplication (name, arguments'), count')
+    | TkLet (info, vars, expr) -> (
         match vars with
         | [] -> uniquify_exp count context expr
         | { name = { str = name; position = _ }; value } :: rest ->
@@ -34,21 +34,21 @@ let uniquify input =
             in
             let context' = StringMap.add name name' context in
             let expr', count''' =
-              uniquify_exp count'' context' (RkLet (info, rest, expr))
+              uniquify_exp count'' context' (TkLet (info, rest, expr))
             in
-            (RkCLet (name', value', expr'), count'''))
+            (TkCLet (name', value', expr'), count'''))
   in
   let uniquified, _ = uniquify_exp 1 StringMap.empty input in
   uniquified
 
 let rec format_uniquified node =
   match node with
-  | RkCVar name -> name
-  | RkCValueNumber number -> string_of_int number
-  | RkCApplication (name, args) ->
+  | TkCVar name -> name
+  | TkCValueNumber number -> string_of_int number
+  | TkCApplication (name, args) ->
       let args' = List.map (fun arg -> " " ^ format_uniquified arg) args in
       "(" ^ name ^ String.concat "" args' ^ ")"
-  | RkCLet (name, value, expr) ->
+  | TkCLet (name, value, expr) ->
       let value' = format_uniquified value in
       let expr' = format_uniquified expr in
       "(let ([" ^ name ^ " " ^ value' ^ "]) " ^ expr' ^ ")"
@@ -68,14 +68,14 @@ module MonadicRacket = struct
     let rec remove_complex_operands_inner count (expr : racket_clear_node) :
         node * int =
       match expr with
-      | RkCApplication (name, args) -> (
+      | TkCApplication (name, args) -> (
           match name with
           | "-" -> (
               match args with
               | [ value ] -> (
                   match value with
-                  | RkCVar name -> (UnMinus (Var name), count)
-                  | RkCValueNumber value -> (UnMinus (Int value), count)
+                  | TkCVar name -> (UnMinus (Var name), count)
+                  | TkCValueNumber value -> (UnMinus (Int value), count)
                   | other ->
                       let expr', count' =
                         remove_complex_operands_inner count other
@@ -85,11 +85,11 @@ module MonadicRacket = struct
                   )
               | [ lhs; rhs ] -> (
                   match lhs with
-                  | RkCVar l_name -> (
+                  | TkCVar l_name -> (
                       match rhs with
-                      | RkCVar r_name ->
+                      | TkCVar r_name ->
                           (BinMinus (Var l_name, Var r_name), count)
-                      | RkCValueNumber r_val ->
+                      | TkCValueNumber r_val ->
                           (BinMinus (Var l_name, Int r_val), count)
                       | _ ->
                           let rhs', count' =
@@ -98,11 +98,11 @@ module MonadicRacket = struct
                           let r_name = Printf.sprintf "tmp.%d" count' in
                           ( Let (r_name, rhs', BinMinus (Var l_name, Var r_name)),
                             count' + 1 ))
-                  | RkCValueNumber l_val -> (
+                  | TkCValueNumber l_val -> (
                       match rhs with
-                      | RkCVar r_name ->
+                      | TkCVar r_name ->
                           (BinMinus (Int l_val, Var r_name), count)
-                      | RkCValueNumber r_val ->
+                      | TkCValueNumber r_val ->
                           (BinMinus (Int l_val, Int r_val), count)
                       | _ ->
                           let rhs', count' =
@@ -119,10 +119,10 @@ module MonadicRacket = struct
                         (Printf.sprintf "tmp.%d" count', count' + 1)
                       in
                       match rhs with
-                      | RkCVar r_name ->
+                      | TkCVar r_name ->
                           ( Let (l_name, lhs', BinMinus (Var l_name, Var r_name)),
                             count'' )
-                      | RkCValueNumber r_val ->
+                      | TkCValueNumber r_val ->
                           ( Let (l_name, lhs', BinMinus (Var l_name, Int r_val)),
                             count'' )
                       | _ ->
@@ -143,10 +143,10 @@ module MonadicRacket = struct
               match args with
               | [ lhs; rhs ] -> (
                   match lhs with
-                  | RkCVar l_name -> (
+                  | TkCVar l_name -> (
                       match rhs with
-                      | RkCVar r_name -> (Plus (Var l_name, Var r_name), count)
-                      | RkCValueNumber r_val ->
+                      | TkCVar r_name -> (Plus (Var l_name, Var r_name), count)
+                      | TkCValueNumber r_val ->
                           (Plus (Var l_name, Int r_val), count)
                       | _ ->
                           let rhs', count' =
@@ -155,10 +155,10 @@ module MonadicRacket = struct
                           let r_name = Printf.sprintf "tmp.%d" count' in
                           ( Let (r_name, rhs', Plus (Var l_name, Var r_name)),
                             count' + 1 ))
-                  | RkCValueNumber l_val -> (
+                  | TkCValueNumber l_val -> (
                       match rhs with
-                      | RkCVar r_name -> (Plus (Int l_val, Var r_name), count)
-                      | RkCValueNumber r_val ->
+                      | TkCVar r_name -> (Plus (Int l_val, Var r_name), count)
+                      | TkCValueNumber r_val ->
                           (Plus (Int l_val, Int r_val), count)
                       | _ ->
                           let rhs', count' =
@@ -175,10 +175,10 @@ module MonadicRacket = struct
                         (Printf.sprintf "tmp.%d" count', count' + 1)
                       in
                       match rhs with
-                      | RkCVar r_name ->
+                      | TkCVar r_name ->
                           ( Let (l_name, lhs', Plus (Var l_name, Var r_name)),
                             count'' )
-                      | RkCValueNumber r_val ->
+                      | TkCValueNumber r_val ->
                           ( Let (l_name, lhs', Plus (Var l_name, Int r_val)),
                             count'' )
                       | _ ->
@@ -195,12 +195,12 @@ module MonadicRacket = struct
               | _ -> failwith "unreachable")
           | "read" -> (Read, count)
           | _ -> failwith "unreachable")
-      | RkCLet (name, value, expr) ->
+      | TkCLet (name, value, expr) ->
           let value', count' = remove_complex_operands_inner count value in
           let expr', count'' = remove_complex_operands_inner count' expr in
           (Let (name, value', expr'), count'')
-      | RkCValueNumber value -> (Atm (Int value), count)
-      | RkCVar name -> (Atm (Var name), count)
+      | TkCValueNumber value -> (Atm (Int value), count)
+      | TkCVar name -> (Atm (Var name), count)
     in
     match remove_complex_operands_inner 0 input with res, _ -> res
 

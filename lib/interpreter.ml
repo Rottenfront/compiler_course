@@ -5,8 +5,8 @@ type interp_context = { variables : int StringMap.t }
 
 let rec interpret context expr =
   match expr with
-  | RkVar (_, name) -> StringMap.find name context.variables
-  | RkApplication (_, { name = { str = name; position = _ }; arguments }) -> (
+  | TkVar (_, name) -> StringMap.find name context.variables
+  | TkApplication (_, { name = { str = name; position = _ }; arguments }) -> (
       match name with
       | "read" -> (
           match arguments with
@@ -22,8 +22,8 @@ let rec interpret context expr =
           | [ lhs; rhs ] -> interpret context lhs + interpret context rhs
           | _ -> failwith "unreachable if code is checked")
       | _ -> failwith "unreachable if code is checked")
-  | RkValueNumber (_, value) -> value
-  | RkLet (_, vars, expr) ->
+  | TkValueNumber (_, value) -> value
+  | TkLet (_, vars, expr) ->
       let rec add_variables context variables =
         match variables with
         | [] -> context
