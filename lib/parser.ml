@@ -31,11 +31,11 @@ and application_info = { name : substring; arguments : expr list }
 and var_info = { name : substring; value : expr }
 and operator_info = { lhs : expr; operator : operator; rhs : expr }
 
-type declaration = { name : string; types : string list }
+type declaration = { name : substring; types : type_expr list }
 
 type implementation = {
-  name : string;
-  parameters : string list;
+  name : substring;
+  parameters : substring list;
   expression : expr;
 }
 
@@ -56,6 +56,9 @@ let get_position expr =
   | TmLet (position, _, _) -> position
   | TmOpApp (position, _) -> position
   | TmIf (position, _, _, _) -> position
+
+let type_position type_ =
+  match type_ with TyBool pos -> pos | TyInt pos -> pos | TyUnit pos -> pos
 
 let rec parse_expr tokens is_in_application =
   let rec parse_application name position arguments tokens =
@@ -281,3 +284,74 @@ let parse_type tokens =
                (print_position (token_position tok)))
   in
   aux tokens false
+
+let parse_decl tokens =
+  let name, cs =
+    match tokens with
+    | TkIdent (position, name) :: cs -> ({ str = name; position }, cs)
+    | [] -> failwith "Unexpected end in function declaration"
+    | tok :: _ ->
+        failwith
+          (Printf.sprintf "Unexpected token on %s"
+             (print_position (token_position tok)))
+  in
+  let cs' =
+    match cs with
+    | TkDoubleColon _ :: cs' -> cs'
+    | [] -> failwith "Unexpected end in function declaration"
+    | tok :: _ ->
+        failwith
+          (Printf.sprintf "Unexpected token on %s"
+             (print_position (token_position tok)))
+  in
+  let types, cs'' = parse_type cs' in
+  ( { name; types },
+    types |> List.map type_position |> List.fold_left extend_span name.position,
+    cs'' )
+
+let parse_impl tokens =
+  let rec parse_names tokens =
+    match tokens with
+    | TkIdent (position, name) :: rest ->
+        let next, cs = parse_names rest in
+        ({ str = name; position } :: next, cs)
+    | [] -> failwith "Unexpected end in function declaration"
+    | TkSet _ :: rest -> ([], rest)
+    | tok :: _ ->
+        failwith
+          (Printf.sprintf "Unexpected token in function implementation on %s"
+             (print_position (token_position tok)))
+  in
+  let name, cs =
+    match tokens with
+    | TkIdent (position, name) :: cs -> ({ str = name; position }, cs)
+    | [] -> failwith "Unexpected end in function declaration"
+    | tok :: _ ->
+        failwith
+          (Printf.sprintf "Unexpected token on %s"
+             (print_position (token_position tok)))
+  in
+  let parameters, cs' = parse_names cs in
+  let expression, cs'' =
+    match parse_expr cs' false with
+    | Some expr, cs'' -> (expr, cs'')
+    | None, _ ->
+        failwith "Expected valid expression within function declaration"
+  in
+  ( { name; parameters; expression },
+    extend_span name.position (get_position expression),
+    cs'' )
+
+let parse_stmt tokens =
+  match tokens with
+  | TkDecl position :: rest ->
+      let stmt, pos, cs = parse_decl rest in
+      (Some (StmtDecl (extend_span position pos, stmt)), cs)
+  | TkImpl position :: rest ->
+      let stmt, pos, cs = parse_impl rest in
+      (Some (StmtImpl (extend_span position pos, stmt)), cs)
+  | [] -> (None, tokens)
+  | tok :: _ ->
+      failwith
+        (Printf.sprintf "Unexpected token in statement on %s"
+           (print_position (token_position tok)))

@@ -24,6 +24,7 @@ type lex_token =
   | TkAnd of position
   | TkOr of position
   | TkArrow of position
+  | TkDoubleColon of position
   | TkSet of position
   | TkTrue of position
   | TkFalse of position
@@ -49,6 +50,7 @@ let token_position token =
   | TkAnd pos -> pos
   | TkOr pos -> pos
   | TkArrow pos -> pos
+  | TkDoubleColon pos -> pos
   | TkSet pos -> pos
   | TkTrue pos -> pos
   | TkFalse pos -> pos
@@ -130,6 +132,7 @@ let lexer (input : string) : lex_token list =
         (match operator with
         | "->" -> TkArrow position
         | "=" -> TkSet position
+        | "::" -> TkDoubleColon position
         | other -> TkOperator (position, other))
         :: aux line new_pos cs
     | c :: rest ->
