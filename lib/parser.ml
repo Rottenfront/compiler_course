@@ -17,8 +17,26 @@ type operator =
   | OpAnd
   | OpOr
   | OpXor
+  | OpSemicolon
 
-type type_expr = TyInt of position | TyBool of position | TyUnit of position
+type type_expr =
+  | TyInt of position
+  | TyBool of position
+  | TyUnit of position
+  | TyFunc of position * type_expr list * type_expr
+
+let rec equal_type lhs rhs =
+  match lhs with
+  | TyInt _ -> ( match rhs with TyInt _ -> true | _ -> false)
+  | TyBool _ -> ( match rhs with TyBool _ -> true | _ -> false)
+  | TyUnit _ -> ( match rhs with TyUnit _ -> true | _ -> false)
+  | TyFunc (_, types, res) -> (
+      match rhs with
+      | TyFunc (_, r_types, r_res) ->
+          List.combine types r_types
+          |> List.for_all (fun (lhs, rhs) -> equal_type lhs rhs)
+          && equal_type res r_res
+      | _ -> false)
 
 type expr =
   | TmLiteral of position * literal
@@ -26,22 +44,22 @@ type expr =
   | TmOpApp of position * operator_info
   | TmLet of position * var_info * expr
   | TmIf of position * expr * expr * expr
+  | TmParenth of expr
 
 and application_info = { name : substring; arguments : expr list }
 and var_info = { name : substring; value : expr }
 and operator_info = { lhs : expr; operator : operator; rhs : expr }
 
-type declaration = { name : substring; types : type_expr list }
+type declaration = { position : position; name : substring; type_ : type_expr }
 
 type implementation = {
+  position : position;
   name : substring;
   parameters : substring list;
   expression : expr;
 }
 
-type statement =
-  | StmtDecl of position * declaration
-  | StmtImpl of position * implementation
+type statement = StmtDecl of declaration | StmtImpl of implementation
 
 let default_char_pos : char_position = { line = 0; char = 0 }
 let default_position : position = (default_char_pos, default_char_pos)
@@ -49,16 +67,21 @@ let default_position : position = (default_char_pos, default_char_pos)
 let extend_span ((left, _) : position) ((_, right) : position) : position =
   (left, right)
 
-let get_position expr =
+let rec get_position expr =
   match expr with
   | TmLiteral (position, _) -> position
   | TmApplication (position, _) -> position
   | TmLet (position, _, _) -> position
   | TmOpApp (position, _) -> position
   | TmIf (position, _, _, _) -> position
+  | TmParenth expr -> get_position expr
 
 let type_position type_ =
-  match type_ with TyBool pos -> pos | TyInt pos -> pos | TyUnit pos -> pos
+  match type_ with
+  | TyBool pos -> pos
+  | TyInt pos -> pos
+  | TyUnit pos -> pos
+  | TyFunc (pos, _, _) -> pos
 
 let rec parse_expr tokens is_in_application =
   let rec parse_application name position arguments tokens =
@@ -251,13 +274,99 @@ let rec parse_expr tokens is_in_application =
               | ">=" -> OpGreaterEq
               | "||" -> OpOr
               | "&&" -> OpAnd
+              | "^" -> OpXor
+              | ";" -> OpSemicolon
               | _ -> failwith (Printf.sprintf "Unknown operator: %s" op_token)
             in
             parse_rhs lhs cs operator pos
         | _ -> (Some lhs, rest))
     | None -> (None, rest)
 
+let operator_level operator =
+  match operator with
+  | OpAdd -> 2
+  | OpSub -> 2
+  | OpMul -> 1
+  | OpDiv -> 1
+  | OpEq -> 4
+  | OpNe -> 4
+  | OpLess -> 3
+  | OpGreater -> 3
+  | OpLessEq -> 3
+  | OpGreaterEq -> 3
+  | OpAnd -> 5
+  | OpOr -> 6
+  | OpXor -> 7
+  | OpSemicolon -> 10
+
+let max_level = 10
+
+let rec flatten_op_app expr =
+  match expr with
+  | TmOpApp (_, { lhs; operator; rhs }) ->
+      let lhs_first, lhs_next = flatten_op_app lhs in
+      let rhs_first, rhs_next = flatten_op_app rhs in
+      (lhs_first, List.append lhs_next ((operator, rhs_first) :: rhs_next))
+  | other -> (other, [])
+
+let rec distribute_operator expr =
+  let rec distribute_level lhs rhs level =
+    if level = 0 then lhs
+      (* there is no way for rhs to have any more elements *)
+    else
+      let rec split_by_level lhs prev_rhs next_rhs level =
+        match next_rhs with
+        | [] -> distribute_level lhs (List.rev prev_rhs) (level - 1)
+        | (operator, expr) :: rest ->
+            if operator_level operator = level then
+              let l = distribute_level lhs (List.rev prev_rhs) (level - 1) in
+              let r = split_by_level expr [] rest level in
+              let position = extend_span (get_position l) (get_position r) in
+              TmOpApp (position, { lhs = l; operator; rhs = r })
+            else split_by_level lhs ((operator, expr) :: prev_rhs) rest level
+      in
+      split_by_level lhs [] rhs level
+  in
+  match expr with
+  | TmOpApp (pos, op_app) ->
+      let lhs, rhs = flatten_op_app (TmOpApp (pos, op_app)) in
+      let lhs' = distribute_operator lhs in
+      let rhs' =
+        List.map
+          (fun (operator, expr) -> (operator, distribute_operator expr))
+          rhs
+      in
+      distribute_level lhs' rhs' max_level
+  | TmApplication (pos, { name; arguments }) ->
+      TmApplication
+        (pos, { name; arguments = List.map distribute_operator arguments })
+  | TmIf (pos, cond, lhs, rhs) ->
+      TmIf
+        ( pos,
+          distribute_operator cond,
+          distribute_operator lhs,
+          distribute_operator rhs )
+  | TmLet (pos, { name; value }, expr) ->
+      TmLet
+        ( pos,
+          { name; value = distribute_operator value },
+          distribute_operator expr )
+  | TmParenth expr -> distribute_operator expr
+  | other -> other
+
 let parse_type tokens =
+  let rec parse_types types pos =
+    match types with
+    | [] -> TyUnit pos
+    | type' :: [] -> type'
+    | type' :: rest ->
+        let next, res =
+          match parse_types rest pos with
+          | TyFunc (_, next, res) -> (next, res)
+          | other -> ([], other)
+        in
+        TyFunc (pos, type' :: next, res)
+  in
   let rec aux tokens is_between =
     if is_between then
       match tokens with
@@ -270,20 +379,42 @@ let parse_type tokens =
           ( (match name with
             | "int" -> TyInt pos
             | "bool" -> TyBool pos
-            | "unit" -> TyUnit pos
             | _ ->
                 failwith
                   (Printf.sprintf "Unknown type `%s` on %s" name
                      (print_position pos)))
             :: next_types,
             cs )
-      | [] -> failwith "Unexpected end in type declaration"
+      | TkParenOpen pos1 :: rest ->
+          let types, cs = aux rest true in
+          let pos2, cs' =
+            match cs with
+            | TkParenClose pos2 :: cs' -> (pos2, cs')
+            | [] -> failwith "unexpected end in type declaration"
+            | tok :: _ ->
+                failwith
+                  (Printf.sprintf "Unexpected token on %s"
+                     (print_position (token_position tok)))
+          in
+          let next_types, cs'' = aux cs' true in
+          (parse_types types (extend_span pos1 pos2) :: next_types, cs'')
+      | [] -> failwith "unexpected end in type declaration"
       | tok :: _ ->
           failwith
             (Printf.sprintf "Unexpected token on %s"
                (print_position (token_position tok)))
   in
-  aux tokens false
+  let types, rest = aux tokens false in
+  let heading_position =
+    match types with
+    | head :: _ -> type_position head
+    | _ -> failwith "unreachable"
+  in
+  let position =
+    types |> List.map type_position
+    |> List.fold_left extend_span heading_position
+  in
+  (parse_types types position, rest)
 
 let parse_decl tokens =
   let name, cs =
@@ -304,10 +435,8 @@ let parse_decl tokens =
           (Printf.sprintf "Unexpected token on %s"
              (print_position (token_position tok)))
   in
-  let types, cs'' = parse_type cs' in
-  ( { name; types },
-    types |> List.map type_position |> List.fold_left extend_span name.position,
-    cs'' )
+  let type_, cs'' = parse_type cs' in
+  ({ position = type_position type_; name; type_ }, cs'')
 
 let parse_impl tokens =
   let rec parse_names tokens =
@@ -338,20 +467,43 @@ let parse_impl tokens =
     | None, _ ->
         failwith "Expected valid expression within function declaration"
   in
-  ( { name; parameters; expression },
-    extend_span name.position (get_position expression),
+  let expression' = distribute_operator expression in
+  ( {
+      position = extend_span name.position (get_position expression);
+      name;
+      parameters;
+      expression = expression';
+    },
     cs'' )
 
 let parse_stmt tokens =
   match tokens with
-  | TkDecl position :: rest ->
-      let stmt, pos, cs = parse_decl rest in
-      (Some (StmtDecl (extend_span position pos, stmt)), cs)
-  | TkImpl position :: rest ->
-      let stmt, pos, cs = parse_impl rest in
-      (Some (StmtImpl (extend_span position pos, stmt)), cs)
+  | TkDecl pos :: rest ->
+      let { position; name; type_ }, cs = parse_decl rest in
+      (Some (StmtDecl { position = extend_span pos position; name; type_ }), cs)
+  | TkImpl pos :: rest ->
+      let { position; name; parameters; expression }, cs = parse_impl rest in
+      ( Some
+          (StmtImpl
+             {
+               position = extend_span pos position;
+               name;
+               parameters;
+               expression;
+             }),
+        cs )
   | [] -> (None, tokens)
   | tok :: _ ->
       failwith
         (Printf.sprintf "Unexpected token in statement on %s"
            (print_position (token_position tok)))
+
+let rec collect_declarations statements =
+  match statements with
+  | StmtDecl decl :: rest ->
+      let next_decls, impls = collect_declarations rest in
+      (decl :: next_decls, impls)
+  | StmtImpl impl :: rest ->
+      let decls, next_impls = collect_declarations rest in
+      (decls, impl :: next_impls)
+  | [] -> ([], [])

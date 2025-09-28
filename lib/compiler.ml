@@ -1,4 +1,4 @@
-open Parser
+(* open Parser
 open Utils
 
 type racket_clear_node =
@@ -429,3 +429,4 @@ module AsmGenerator = struct
     String.concat "\n"
       [ prelude; memory_allocation; logic; memory_deallocation; epilogue ]
 end
+*)

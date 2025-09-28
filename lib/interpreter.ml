@@ -1,4 +1,4 @@
-open Parser
+(*open Parser
 open Utils
 
 type interp_context = { variables : int StringMap.t }
@@ -38,4 +38,4 @@ let racket_interpreter input =
   let errors = Checker.racket_checker input in
   if List.is_empty errors then
     Ok (interpret { variables = StringMap.empty } input)
-  else Error errors
+  else Error errors *)
