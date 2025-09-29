@@ -32,7 +32,9 @@ let rec get_type context expr =
       Some (match lit with LitNumber _ -> TyInt pos | LitBool _ -> TyBool pos)
   | TmApplication (pos, { name; arguments = _ }) ->
       if StringMap.mem name.str context.functions then
-        Some (set_type_position pos (StringMap.find name.str context.functions))
+        Some
+          (StringMap.find name.str context.functions
+          |> set_type_position pos |> get_result_type)
       else None
   | TmOpApp (pos, { lhs = _; operator; rhs }) -> (
       match operator with

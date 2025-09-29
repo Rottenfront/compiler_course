@@ -50,6 +50,19 @@ and application_info = { name : substring; arguments : expr list }
 and var_info = { name : substring; value : expr }
 and operator_info = { lhs : expr; operator : operator; rhs : expr }
 
+type parse_error =
+  | UnexpectedTokenInLet of lex_token
+  | ConditionExpressionExpected of position
+  | ThenTokenExpected of lex_token
+  | ElseTokenExpected of lex_token
+  | CannotUseConditionInFunction of position
+  | CannotDefineVariableInFunction of position
+  | UnknownOperator of substring
+  | ExpectedExpressionAfterOperator of position
+  | UnknownType of substring
+  | UnexpectedEnd of char_position
+  | NoPossibleExpression of lex_token
+
 type declaration = { position : position; name : substring; type_ : type_expr }
 
 type implementation = {
@@ -63,6 +76,61 @@ type statement = StmtDecl of declaration | StmtImpl of implementation
 
 let default_char_pos : char_position = { line = 0; char = 0 }
 let default_position : position = (default_char_pos, default_char_pos)
+
+type 'a parser = lex_token list -> ('a, parse_error) result * lex_token list
+
+let return (x : 'a) : 'a parser = fun tokens -> (Ok x, tokens)
+
+let bind (p : 'a parser) (f : 'a -> 'b parser) : 'b parser =
+ fun tokens ->
+  match p tokens with Ok v, rest -> f v rest | Error e, rest -> (Error e, rest)
+
+let fail (err : parse_error) : 'a parser = fun rest -> (Error err, rest)
+let ( let* ) = bind
+let ( let* ) = bind
+
+let map p f =
+ fun tokens ->
+  match p tokens with Ok (v, rest) -> Ok (f v, rest) | Error e -> Error e
+
+let or_else p q tokens =
+  match p tokens with Ok _ as ok -> ok | Error _ -> q tokens
+
+let ( <|> ) = or_else
+let run (p : 'a parser) (tokens : lex_token list) = p tokens
+
+let error_unexpected_end pos : 'a parser =
+ fun rest -> (Error (UnexpectedEnd pos), rest)
+
+let error_unexpected_token_let tok : 'a parser =
+ fun rest -> (Error (UnexpectedTokenInLet tok), rest)
+
+let error_condition_expected pos : 'a parser =
+ fun rest -> (Error (ConditionExpressionExpected pos), rest)
+
+let error_else_expected tok : 'a parser =
+ fun rest -> (Error (ElseTokenExpected tok), rest)
+
+let error_then_expected tok : 'a parser =
+ fun rest -> (Error (ThenTokenExpected tok), rest)
+
+let error_cannot_use_condition pos : 'a parser =
+ fun rest -> (Error (CannotUseConditionInFunction pos), rest)
+
+let error_cannot_define_variable pos : 'a parser =
+ fun rest -> (Error (CannotDefineVariableInFunction pos), rest)
+
+let error_unknown_operator str : 'a parser =
+ fun rest -> (Error (UnknownOperator str), rest)
+
+let error_unknown_type str : 'a parser =
+ fun rest -> (Error (UnknownType str), rest)
+
+let error_no_possible_expression tok : 'a parser =
+ fun rest -> (Error (NoPossibleExpression tok), rest)
+
+let error_expected_expression_after_operator pos : 'a parser =
+ fun rest -> (Error (ExpectedExpressionAfterOperator pos), rest)
 
 let extend_span ((left, _) : position) ((_, right) : position) : position =
   (left, right)
@@ -83,69 +151,128 @@ let type_position type_ =
   | TyUnit pos -> pos
   | TyFunc (pos, _, _) -> pos
 
+(* Generic token expectation:
+   pred: token -> bool
+   on_empty: parse_error  (what to return if token list is empty)
+   on_unexpected: token -> parse_error (how to convert a wrong token into an error)
+*)
+let expect_token ~pred ~on_empty ~on_unexpected : lex_token parser =
+ fun tokens ->
+  match tokens with
+  | tok :: rest when pred tok -> (Ok tok, rest)
+  | [] -> on_empty []
+  | tok :: rest -> on_unexpected tok rest
+
+(* Expect an identifier token and return (pos, string) like your old code did *)
+let expect_ident ~on_empty ~on_unexpected : substring parser =
+ fun tokens ->
+  match tokens with
+  | TkIdent (position, str) :: rest -> (Ok { str; position }, rest)
+  | [] -> on_empty []
+  | tok :: rest -> on_unexpected tok rest
+
+let rec parse_expr position tokens in_function =
+  let parse_required_expr ~position : expr parser =
+   fun tokens ->
+    let res, rest = parse_expr position tokens false in
+    match res with
+    | Ok expr -> (Ok expr, rest)
+    | Error (NoPossibleExpression _) ->
+        (Error (UnexpectedEnd (snd position)), rest)
+    | Error err -> (Error err, rest)
+  in
+
+  let parse_let (position : position) : expr parser =
+    (* small predicate helpers *)
+    let is_set = function TkSet _ -> true | _ -> false in
+    let is_in = function TkIn _ -> true | _ -> false in
+
+    (* adapter for parse_expr that maps NoPossibleExpression -> UnexpectedEnd(snd pos) *)
+    let parse_expr_at_pos pos = parse_required_expr ~position:pos in
+
+    (* the parser pipeline: *)
+    let* name =
+      expect_ident
+        ~on_empty:(error_unexpected_end (snd position))
+        ~on_unexpected:error_unexpected_token_let
+    in
+
+    let* _set =
+      expect_token ~pred:is_set
+        ~on_empty:(error_unexpected_end (snd name.position))
+        ~on_unexpected:error_unexpected_token_let
+    in
+
+    (* parse the value expression; if parse_expr says NoPossibleExpression we translate it
+     into UnexpectedEnd (snd position) — same behaviour as your original code *)
+    let* value = parse_expr_at_pos position in
+
+    (* update local span with the value's span *)
+    let position_after_value = get_position value in
+
+    (* expect `in` token and get its position *)
+    let* in_tok =
+      expect_token ~pred:is_in
+        ~on_empty:(get_position value |> snd |> error_unexpected_end)
+        ~on_unexpected:error_unexpected_token_let
+    in
+
+    match in_tok with
+    | TkIn tok_pos ->
+        let position_after_in = extend_span position_after_value tok_pos in
+        let* expr = parse_expr_at_pos position_after_in in
+        let let_span = get_position expr |> extend_span position_after_in in
+        return (TmLet (let_span, { name; value }, expr))
+    | tok -> error_unexpected_token_let tok
+  in
+  run (parse_let position) tokens
+
 let rec parse_expr tokens is_in_application =
   let rec parse_application name position arguments tokens =
     match parse_expr tokens true with
-    | Some expr, rest ->
+    | Ok expr, rest ->
         parse_application name
           (extend_span position (get_position expr))
           (expr :: arguments) rest
-    | None, rest ->
-        ( Some
-            (TmApplication (position, { name; arguments = List.rev arguments })),
+    | Error (NoPossibleExpression _), rest ->
+        ( Ok (TmApplication (position, { name; arguments = List.rev arguments })),
           rest )
+    | Error err, rest -> (Error err, rest)
   in
   let parse_let tokens position =
-    let name, rest =
-      match tokens with
-      | TkIdent (pos, ident) :: rest -> ({ str = ident; position = pos }, rest)
-      | [] ->
-          failwith
-            (Printf.sprintf "Unexpected end in variable definition (%s)"
-               (print_position position))
-      | tok :: _ ->
-          failwith
-            (Printf.sprintf "Unexpected token in variable definition on %s"
-               (print_position (token_position tok)))
-    in
-    let rest' =
-      match rest with
-      | TkSet _ :: rest' -> rest'
-      | [] ->
-          failwith
-            (Printf.sprintf "Unexpected end in variable definition (%s)"
-               (print_position position))
-      | tok :: _ ->
-          failwith
-            (Printf.sprintf "Unexpected token in variable definition on %s"
-               (print_position (token_position tok)))
-    in
-    let value, position, cs =
-      match parse_expr rest' false with
-      | Some expr, cs -> (expr, extend_span position (get_position expr), cs)
-      | _ ->
-          failwith
-            (Printf.sprintf "Unexpected end in variable definition (%s)"
-               (print_position position))
-    in
-    let position, cs' =
-      match cs with
-      | TkIn tok_pos :: cs' -> (extend_span position tok_pos, cs')
-      | _ ->
-          failwith
-            (Printf.sprintf "Unexpected end in variable definition (%s)"
-               (print_position position))
-    in
-    match parse_expr cs' false with
-    | Some expr, cs'' ->
-        ( Some
-            (TmLet
-               (extend_span position (get_position expr), { name; value }, expr)),
-          cs'' )
-    | None, _ ->
-        failwith
-          (Printf.sprintf "Unexpected end in variable definition (%s)"
-             (print_position position))
+    match tokens with
+    | TkIdent (pos, ident) :: rest -> (
+        let name = { str = ident; position = pos } in
+        match rest with
+        | TkSet _ :: rest' -> (
+            match parse_expr rest' false with
+            | Ok expr, cs -> (
+                let value, position, cs =
+                  (expr, extend_span position (get_position expr), cs)
+                in
+                match cs with
+                | TkIn tok_pos :: cs' -> (
+                    let position = extend_span position tok_pos in
+                    match parse_expr cs' false with
+                    | Ok expr, cs'' ->
+                        ( Ok
+                            (TmLet
+                               ( get_position expr |> extend_span position,
+                                 { name; value },
+                                 expr )),
+                          cs'' )
+                    | Error (NoPossibleExpression _), rest ->
+                        (Error (UnexpectedEnd (snd position)), rest)
+                    | Error err, rest -> (Error err, rest))
+                | [] -> (Error (UnexpectedEnd (snd position)), [])
+                | tok :: rest -> (Error (UnexpectedTokenInLet tok), rest))
+            | Error (NoPossibleExpression _), rest ->
+                (Error (UnexpectedEnd (snd position)), rest)
+            | Error err, rest -> (Error err, rest))
+        | [] -> (Error (UnexpectedEnd (snd position)), [])
+        | tok :: rest -> (Error (UnexpectedTokenInLet tok), rest))
+    | [] -> (Error (UnexpectedEnd (snd position)), [])
+    | tok :: rest -> (Error (UnexpectedTokenInLet tok), rest)
   in
   let parse_if tokens position =
     let cond, position, rest =
