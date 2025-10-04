@@ -71,30 +71,52 @@ type parse_error =
   | NoPossibleExpression
   | NoPossibleType
 
-
-
 let print_error error =
   match error with
-  | ConditionExpressionExpected pos -> Printf.sprintf "Condition expression expected on %s" (print_position pos)
-  | ThenTokenExpected tok -> Printf.sprintf "`then` token expected, got: `%s`" (print_token tok)
-  | ElseTokenExpected tok -> Printf.sprintf "`else` token expected, got: `%s`" (print_token tok)
-  | InTokenExpected tok -> Printf.sprintf "`in` token expected, got: `%s`" (print_token tok)
-  | SetTokenExpected tok -> Printf.sprintf "`=` token expected, got: `%s`" (print_token tok)
-  | ArrowTokenExpected tok -> Printf.sprintf "`->` token expected, got: `%s`" (print_token tok)
-  | IdentTokenExpected tok -> Printf.sprintf "identifier token expected, got: `%s`" (print_token tok)
-  | ParenCloseExpected tok -> Printf.sprintf "`)` token expected, got: `%s`" (print_token tok)
-  | DoubleColonExpected tok -> Printf.sprintf "`::` token expected, got: `%s`" (print_token tok)
-  | StatementExpected tok -> Printf.sprintf "`impl` of `decl` expected, got: `%s`" (print_token tok)
-  | CannotUseConditionInFunction pos -> Printf.sprintf "Cannot use condition expression inside as an argument without paretheses (%s)" (print_position pos)
-  | CannotDefineVariableInFunction pos -> Printf.sprintf "Cannot define variables inside as an argument without paretheses (%s)" (print_position pos)
-  | UnknownOperator {str; position} -> Printf.sprintf "Unknown operator `%s` used on %s" str (print_position position)
-  | ExpectedExpressionAfterOperator pos -> Printf.sprintf "Expected expression after operator on %s" (print_position pos)
-  | UnknownType {str; position} -> Printf.sprintf "Unknown type `%s` used on %s" str (print_position position)
-  | FunctionNameExpected tok -> Printf.sprintf "`then` token expected, got: `%s`" (print_token tok)
-  | UnexpectedEnd {line; char} -> Printf.sprintf "Unexpected end on %d:%d" line char
+  | ConditionExpressionExpected pos ->
+      Printf.sprintf "Condition expression expected on %s" (print_position pos)
+  | ThenTokenExpected tok ->
+      Printf.sprintf "`then` token expected, got: `%s`" (print_token tok)
+  | ElseTokenExpected tok ->
+      Printf.sprintf "`else` token expected, got: `%s`" (print_token tok)
+  | InTokenExpected tok ->
+      Printf.sprintf "`in` token expected, got: `%s`" (print_token tok)
+  | SetTokenExpected tok ->
+      Printf.sprintf "`=` token expected, got: `%s`" (print_token tok)
+  | ArrowTokenExpected tok ->
+      Printf.sprintf "`->` token expected, got: `%s`" (print_token tok)
+  | IdentTokenExpected tok ->
+      Printf.sprintf "identifier token expected, got: `%s`" (print_token tok)
+  | ParenCloseExpected tok ->
+      Printf.sprintf "`)` token expected, got: `%s`" (print_token tok)
+  | DoubleColonExpected tok ->
+      Printf.sprintf "`::` token expected, got: `%s`" (print_token tok)
+  | StatementExpected tok ->
+      Printf.sprintf "`impl` of `decl` expected, got: `%s`" (print_token tok)
+  | CannotUseConditionInFunction pos ->
+      Printf.sprintf
+        "Cannot use condition expression inside as an argument without \
+         paretheses (%s)"
+        (print_position pos)
+  | CannotDefineVariableInFunction pos ->
+      Printf.sprintf
+        "Cannot define variables inside as an argument without paretheses (%s)"
+        (print_position pos)
+  | UnknownOperator { str; position } ->
+      Printf.sprintf "Unknown operator `%s` used on %s" str
+        (print_position position)
+  | ExpectedExpressionAfterOperator pos ->
+      Printf.sprintf "Expected expression after operator on %s"
+        (print_position pos)
+  | UnknownType { str; position } ->
+      Printf.sprintf "Unknown type `%s` used on %s" str
+        (print_position position)
+  | FunctionNameExpected tok ->
+      Printf.sprintf "`then` token expected, got: `%s`" (print_token tok)
+  | UnexpectedEnd { line; char } ->
+      Printf.sprintf "Unexpected end on %d:%d" line char
   | NoPossibleExpression -> "No possible expression"
   | NoPossibleType -> "No possible type"
-  
 
 type declaration = { position : position; name : substring; type_ : type_expr }
 

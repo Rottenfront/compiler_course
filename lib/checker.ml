@@ -10,6 +10,11 @@ type check_error =
   | NonexistentFunction of substring
   | UnexpectedArgumentCount of position * int * int
   | NotAFunction of position * int
+  | DoubleDeclaration of declaration
+  | DoubleImplementation of implementation
+  | UnexpectedParameterCount of substring * position * int * int
+  | Unimplemented of declaration
+  | Undeclared of implementation
 
 let get_type_parameter_count type_ =
   match type_ with
@@ -26,15 +31,15 @@ let set_type_position pos type_ =
   | TyBool _ -> TyBool pos
   | TyUnit _ -> TyUnit pos
 
-let rec get_type context expr =
+let rec get_type (context : declaration StringMap.t) expr =
   match expr with
   | TmLiteral (pos, lit) ->
       Some (match lit with LitNumber _ -> TyInt pos | LitBool _ -> TyBool pos)
   | TmApplication (pos, { name; arguments = _ }) ->
-      if StringMap.mem name.str context.functions then
+      if StringMap.mem name.str context then
         Some
-          (StringMap.find name.str context.functions
-          |> set_type_position pos |> get_result_type)
+          ((StringMap.find name.str context).type_ |> set_type_position pos
+         |> get_result_type)
       else None
   | TmOpApp (pos, { lhs = _; operator; rhs }) -> (
       match operator with
@@ -51,7 +56,8 @@ let rec get_type context expr =
   | TmLet (_, _, expr) -> get_type context expr
   | TmParenth expr -> get_type context expr
 
-let rec check_expression context expected_type expr =
+let rec check_expression (context : declaration StringMap.t) expected_type expr
+    =
   let current_type = get_type context expr in
   match expr with
   | TmLiteral (_, _) -> (
@@ -122,11 +128,13 @@ let rec check_expression context expected_type expr =
         match value_type with
         | None -> context
         | Some type_ ->
-            {
-              functions =
-                StringMap.remove name.str context.functions
-                |> StringMap.add name.str type_;
-            }
+            StringMap.remove name.str context
+            |> StringMap.add name.str
+                 {
+                   position = extend_span name.position (get_position value);
+                   name;
+                   type_;
+                 }
       in
       List.append value_errors (check_expression new_context expected_type expr)
   | TmOpApp (pos, { lhs; operator; rhs }) -> (
@@ -176,3 +184,98 @@ let rec check_expression context expected_type expr =
           check_bool context lhs rhs
           |> match_expected expected_type (TyBool pos))
   | TmParenth expr -> check_expression context expected_type expr
+
+let default_context : declaration StringMap.t =
+  let add_builtin_declaration name type_ context =
+    StringMap.add name
+      {
+        position = default_position;
+        name = { str = name; position = default_position };
+        type_;
+      }
+      context
+  in
+  StringMap.empty
+  |> add_builtin_declaration "read" (TyInt default_position)
+  |> add_builtin_declaration "print_int"
+       (TyFunc
+          (default_position, [ TyInt default_position ], TyUnit default_position))
+
+let rec create_context context errors (decls : declaration list) :
+    declaration StringMap.t * check_error list =
+  match decls with
+  | decl :: rest ->
+      let context, errors =
+        if StringMap.mem decl.name.str context then
+          (context, DoubleDeclaration decl :: errors)
+        else (StringMap.add decl.name.str decl context, errors)
+      in
+      create_context context errors rest
+  | [] -> (context, errors)
+
+let check_impl context impl =
+  let { type_; position = _; name = _ } =
+    StringMap.find impl.name.str context
+  in
+  let context =
+    match type_ with
+    | TyFunc (_, types, _) ->
+        StringMap.add_seq
+          (List.combine impl.parameters types
+          |> List.map (fun (name, type_) ->
+                 (name.str, { position = name.position; name; type_ }))
+          |> List.to_seq)
+          context
+    | _ -> context
+  in
+  check_expression context (Some (get_result_type type_)) impl.expression
+
+let rec check_functions (unimplemented : declaration StringMap.t)
+    (implemented : declaration StringMap.t) errors impls =
+  match impls with
+  | { position; name; parameters; expression } :: rest ->
+      let unimplemented, implemented, errors =
+        if StringMap.mem name.str unimplemented then
+          let signature = StringMap.find name.str unimplemented in
+          let expected_param_count = get_type_parameter_count signature.type_ in
+          let errors =
+            if List.length parameters == expected_param_count then errors
+            else
+              UnexpectedParameterCount
+                (name, position, expected_param_count, List.length parameters)
+              :: errors
+          in
+          ( StringMap.remove name.str unimplemented,
+            StringMap.add name.str signature implemented,
+            errors )
+        else
+          let impl = { position; name; parameters; expression } in
+          ( unimplemented,
+            implemented,
+            (if StringMap.mem name.str implemented then
+               DoubleImplementation impl
+             else Undeclared impl)
+            :: errors )
+      in
+      check_functions unimplemented implemented errors rest
+  | [] ->
+      ( implemented,
+        unimplemented
+        |> StringMap.map (fun decl -> Unimplemented decl)
+        |> StringMap.to_list |> List.rev
+        |> List.map (fun (_, value) -> value)
+        |> List.append errors )
+
+let rec check_impls context errors impls =
+  match impls with
+  | [] -> errors
+  | impl :: rest ->
+      let errors = check_impl context impl |> List.append errors in
+      check_impls context errors rest
+
+let combined_check decls impls =
+  let context = default_context in
+  let decls, errors = create_context StringMap.empty [] decls in
+  let decls, errors = check_functions decls StringMap.empty errors impls in
+  let context = StringMap.merge (fun _ _ rhs -> rhs) context decls in
+  if List.is_empty errors then check_impls context [] impls else errors
