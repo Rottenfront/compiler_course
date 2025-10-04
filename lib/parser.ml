@@ -3,6 +3,12 @@ open Lexer
 type substring = { str : string; position : position }
 type literal = LitNumber of int | LitBool of bool
 
+let print_literal literal =
+  match literal with
+  | LitNumber number -> Printf.sprintf "%d" number
+  | LitBool true -> "true"
+  | LitBool false -> "false"
+
 type operator =
   | OpAdd
   | OpSub
@@ -18,6 +24,24 @@ type operator =
   | OpOr
   | OpXor
   | OpSemicolon
+
+let print_operator operator =
+  match operator with
+  | OpAdd -> "+"
+  | OpSub -> "-"
+  | OpMul -> "*"
+  | OpDiv -> "/"
+  | OpEq -> "=="
+  | OpNe -> "!="
+  | OpLess -> "<"
+  | OpGreater -> ">"
+  | OpLessEq -> "<="
+  | OpGreaterEq -> ">="
+  | OpAnd -> "&&"
+  | OpOr -> "||"
+  | OpXor -> "^"
+  | OpSemicolon -> ";"
+  
 
 type type_expr =
   | TyInt of position
@@ -356,6 +380,7 @@ let rec parse_expr tokens in_function =
                 | "-" -> Ok (OpSub, pos)
                 | "*" -> Ok (OpMul, pos)
                 | "/" -> Ok (OpDiv, pos)
+                | "==" -> Ok (OpEq, pos)
                 | "!=" -> Ok (OpNe, pos)
                 | "<" -> Ok (OpLess, pos)
                 | ">" -> Ok (OpGreater, pos)

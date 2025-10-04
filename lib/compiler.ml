@@ -1,58 +1,109 @@
-(* open Parser
 open Utils
 
-type racket_clear_node =
-  | RkCVar of string
-  | RkCValueNumber of int
-  | RkCApplication of string * racket_clear_node list
-  | RkCLet of string * racket_clear_node * racket_clear_node
+type operator = Parser.operator
+type literal = Parser.literal
+let print_literal = Parser.print_literal
+let print_operator = Parser.print_operator
 
-let uniquify input =
-  let rec uniquify_exp count (context : string StringMap.t) (expr : racket_node)
-      =
+module Uniquify = struct
+  type term =
+    | TmLit of literal
+    | TmApp of string * term list
+    | TmOp of operator * term * term
+    | TmLet of string * term * term
+    | TmIf of term * term * term
+
+  let uniquify expr =
+    let rec uniquify_expr count (context : string StringMap.t) =
+      let rec uniquify_list count context prev exprs =
+        match exprs with
+        | expr :: rest ->
+            let expr, count = uniquify_expr count context expr in
+            uniquify_list count context (expr :: prev) rest
+        | [] -> (List.rev prev, count)
+      in
+      fun expr ->
+        match expr with
+        | Parser.TmApplication (_, { name = { str; position = _ }; arguments })
+          ->
+            let arguments, count = uniquify_list count context [] arguments in
+            (TmApp (StringMap.find str context, arguments), count)
+        | Parser.TmLiteral (_, lit) -> (TmLit lit, count)
+        | Parser.TmOpApp (_, { lhs; operator; rhs }) ->
+            let lhs, count = uniquify_expr count context lhs in
+            let rhs, count = uniquify_expr count context rhs in
+            (TmOp (operator, lhs, rhs), count)
+        | Parser.TmIf (_, cond, lhs, rhs) ->
+            let cond, count = uniquify_expr count context cond in
+            let lhs, count = uniquify_expr count context lhs in
+            let rhs, count = uniquify_expr count context rhs in
+            (TmIf (cond, lhs, rhs), count)
+        | Parser.TmParenth expr -> uniquify_expr count context expr
+        | Parser.TmLet (_, { name = { str; position = _ }; value }, expr) ->
+            let value, count = uniquify_expr count context value in
+            let name = Printf.sprintf "%s.%d" str count in
+            let context = StringMap.add str name context in
+            let count = count + 1 in
+            let expr, count = uniquify_expr count context expr in
+            (TmLet (name, value, expr), count)
+    in
+    let expr, _ = uniquify_expr 0 StringMap.empty expr in
+    expr
+
+  let rec format_uniquified expr in_application =
     match expr with
-    | RkVar (_, name) -> (RkCVar (StringMap.find name context), count)
-    | RkValueNumber (_, value) -> (RkCValueNumber value, count)
-    | RkApplication (_, { name = { str = name; position = _ }; arguments }) ->
-        let rec uniquify_all count context exprs =
-          match exprs with
-          | [] -> ([], count)
+    | TmLit lit -> print_literal lit
+    | TmApp (name, arguments) ->
+        let rec print_arguments prev arguments =
+          match arguments with
           | expr :: rest ->
-              let expr, count' = uniquify_exp count context expr in
-              let exprs, count'' = uniquify_all count' context rest in
-              (expr :: exprs, count'')
+              print_arguments
+                (Printf.sprintf "%s %s" prev (format_uniquified expr true))
+                rest
+          | [] -> prev
         in
-        let arguments', count' = uniquify_all count context arguments in
-        (RkCApplication (name, arguments'), count')
-    | RkLet (info, vars, expr) -> (
-        match vars with
-        | [] -> uniquify_exp count context expr
-        | { name = { str = name; position = _ }; value } :: rest ->
-            let value', count' = uniquify_exp count context value in
-            let name', count'' =
-              (Printf.sprintf "%s.%d" name count', count' + 1)
-            in
-            let context' = StringMap.add name name' context in
-            let expr', count''' =
-              uniquify_exp count'' context' (RkLet (info, rest, expr))
-            in
-            (RkCLet (name', value', expr'), count'''))
-  in
-  let uniquified, _ = uniquify_exp 1 StringMap.empty input in
-  uniquified
+        if List.is_empty arguments then name
+        else
+          let arguments = print_arguments "" arguments in
+          if in_application then Printf.sprintf "(%s %s)" name arguments
+          else Printf.sprintf "%s %s" name arguments
+    | TmOp (operator, lhs, rhs) ->
+        Printf.sprintf "(%s %s %s)"
+          (format_uniquified lhs false)
+          (print_operator operator)
+          (format_uniquified rhs false)
+    | TmLet (name, value, expr) ->
+        let value = format_uniquified value false in
+        let expr = format_uniquified expr false in
+        if in_application then
+          Printf.sprintf "(let %s = %s in %s)" name value expr
+        else Printf.sprintf "let %s = %s in %s" name value expr
+    | TmIf (cond, lhs, rhs) ->
+        let cond = format_uniquified cond false in
+        let lhs = format_uniquified lhs false in
+        let rhs = format_uniquified rhs false in
+        if in_application then
+          Printf.sprintf "(if %s then %s else %s)" cond lhs rhs
+        else Printf.sprintf "if %s then %s else %s" cond lhs rhs
+end
 
-let rec format_uniquified node =
-  match node with
-  | RkCVar name -> name
-  | RkCValueNumber number -> string_of_int number
-  | RkCApplication (name, args) ->
-      let args' = List.map (fun arg -> " " ^ format_uniquified arg) args in
-      "(" ^ name ^ String.concat "" args' ^ ")"
-  | RkCLet (name, value, expr) ->
-      let value' = format_uniquified value in
-      let expr' = format_uniquified expr in
-      "(let ([" ^ name ^ " " ^ value' ^ "]) " ^ expr' ^ ")"
+(* module Monadic = struct
+  type atm =
+    | AtmVar of string
+    | AtmInt of int
+    | AtmBool of bool
+  
+  type node =
+    | AtmValue of atm
+    | AtmFunction of string * atm list
+    | AtmOp of operator * atm * atm
+    | Let of string * node * node
 
+  let remove_complex_operands expr =
+    
+end *)
+
+(*
 module MonadicRacket = struct
   type atm = Int of int | Var of string
 
