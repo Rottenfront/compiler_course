@@ -29,6 +29,32 @@ type lex_token =
   | TkTrue of position
   | TkFalse of position
 
+let print_token token =
+  match token with
+  | TkIdent (_, ident) -> ident
+  | TkOperator (_, ident) -> ident
+  | TkNumber (_, num) -> string_of_int num
+  | TkParenOpen _ -> "("
+  | TkParenClose _ -> ")"
+  | TkBracketOpen _ -> "["
+  | TkBracketClose _ -> "]"
+  | TkBraceOpen _ -> "{"
+  | TkBraceClose _ -> "}"
+  | TkLet _ -> "let"
+  | TkIn _ -> "in"
+  | TkDecl _ -> "decl"
+  | TkImpl _ -> "impl"
+  | TkIf _ -> "if"
+  | TkThen _ -> "then"
+  | TkElse _ -> "else"
+  | TkAnd _ -> "and"
+  | TkOr _ -> "or"
+  | TkArrow _ -> "->"
+  | TkDoubleColon _ -> "::"
+  | TkSet _ -> "="
+  | TkTrue _ -> "true"
+  | TkFalse _ -> "false"
+
 let token_position token =
   match token with
   | TkIdent (pos, _) -> pos
@@ -59,7 +85,7 @@ let is_digit c = c >= '0' && c <= '9'
 
 let is_operator_symbol c =
   c = '-' || c = '+' || c = '!' || c = '%' || c = '^' || c = '&' || c = '*'
-  || c = '/' || c = '=' || c = '<' || c = '>' || c = '|'
+  || c = '/' || c = '=' || c = '<' || c = '>' || c = '|' || c = ':'
 
 let is_special_char c =
   c = '(' || c = ')' || c = '[' || c = ']' || c = '{' || c = '}'

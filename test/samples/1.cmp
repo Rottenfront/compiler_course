@@ -1,0 +1,10 @@
+decl square :: int -> int
+
+impl square x = x * x
+
+decl main :: ()
+
+impl main =
+	let x = read in
+	let y = read in
+	print_int (x + y)
