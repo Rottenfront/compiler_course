@@ -1,7 +1,7 @@
 open Utils
 
-type operator = Parser.operator
 type literal = Parser.literal
+
 let print_literal = Parser.print_literal
 let print_operator = Parser.print_operator
 
@@ -9,44 +9,43 @@ module Uniquify = struct
   type term =
     | TmLit of literal
     | TmApp of string * term list
-    | TmOp of operator * term * term
+    | TmOp of Parser.operator * term * term
     | TmLet of string * term * term
     | TmIf of term * term * term
 
-  let uniquify expr =
-    let rec uniquify_expr count (context : string StringMap.t) =
-      let rec uniquify_list count context prev exprs =
-        match exprs with
-        | expr :: rest ->
-            let expr, count = uniquify_expr count context expr in
-            uniquify_list count context (expr :: prev) rest
-        | [] -> (List.rev prev, count)
-      in
-      fun expr ->
-        match expr with
-        | Parser.TmApplication (_, { name = { str; position = _ }; arguments })
-          ->
-            let arguments, count = uniquify_list count context [] arguments in
-            (TmApp (StringMap.find str context, arguments), count)
-        | Parser.TmLiteral (_, lit) -> (TmLit lit, count)
-        | Parser.TmOpApp (_, { lhs; operator; rhs }) ->
-            let lhs, count = uniquify_expr count context lhs in
-            let rhs, count = uniquify_expr count context rhs in
-            (TmOp (operator, lhs, rhs), count)
-        | Parser.TmIf (_, cond, lhs, rhs) ->
-            let cond, count = uniquify_expr count context cond in
-            let lhs, count = uniquify_expr count context lhs in
-            let rhs, count = uniquify_expr count context rhs in
-            (TmIf (cond, lhs, rhs), count)
-        | Parser.TmParenth expr -> uniquify_expr count context expr
-        | Parser.TmLet (_, { name = { str; position = _ }; value }, expr) ->
-            let value, count = uniquify_expr count context value in
-            let name = Printf.sprintf "%s.%d" str count in
-            let context = StringMap.add str name context in
-            let count = count + 1 in
-            let expr, count = uniquify_expr count context expr in
-            (TmLet (name, value, expr), count)
+  let rec uniquify_expr count (context : string StringMap.t) =
+    let rec uniquify_list count context prev exprs =
+      match exprs with
+      | expr :: rest ->
+          let expr, count = uniquify_expr count context expr in
+          uniquify_list count context (expr :: prev) rest
+      | [] -> (List.rev prev, count)
     in
+    fun expr ->
+      match expr with
+      | Parser.TmApplication (_, { name = { str; position = _ }; arguments }) ->
+          let arguments, count = uniquify_list count context [] arguments in
+          (TmApp (StringMap.find str context, arguments), count)
+      | Parser.TmLiteral (_, lit) -> (TmLit lit, count)
+      | Parser.TmOpApp (_, { lhs; operator; rhs }) ->
+          let lhs, count = uniquify_expr count context lhs in
+          let rhs, count = uniquify_expr count context rhs in
+          (TmOp (operator, lhs, rhs), count)
+      | Parser.TmIf (_, cond, lhs, rhs) ->
+          let cond, count = uniquify_expr count context cond in
+          let lhs, count = uniquify_expr count context lhs in
+          let rhs, count = uniquify_expr count context rhs in
+          (TmIf (cond, lhs, rhs), count)
+      | Parser.TmParenth expr -> uniquify_expr count context expr
+      | Parser.TmLet (_, { name = { str; position = _ }; value }, expr) ->
+          let value, count = uniquify_expr count context value in
+          let name = Printf.sprintf "%s.%d" str count in
+          let context = StringMap.add str name context in
+          let count = count + 1 in
+          let expr, count = uniquify_expr count context expr in
+          (TmLet (name, value, expr), count)
+
+  let uniquify expr =
     let expr, _ = uniquify_expr 0 StringMap.empty expr in
     expr
 
@@ -87,246 +86,263 @@ module Uniquify = struct
         else Printf.sprintf "if %s then %s else %s" cond lhs rhs
 end
 
-(* module Monadic = struct
-  type atm =
-    | AtmVar of string
-    | AtmInt of int
-    | AtmBool of bool
-  
+module Monadic = struct
+  type atm = AtmVar of string | AtmInt of int | AtmBool of bool
+
+  type math_op =
+    | OpAdd
+    | OpSub
+    | OpMul
+    | OpDiv
+    | OpEq
+    | OpNe
+    | OpLess
+    | OpGreater
+    | OpLessEq
+    | OpGreaterEq
+    | OpXor
+
+  let print_math_op operator =
+    match operator with
+    | OpAdd -> "+"
+    | OpSub -> "-"
+    | OpMul -> "*"
+    | OpDiv -> "/"
+    | OpEq -> "=="
+    | OpNe -> "!="
+    | OpLess -> "<"
+    | OpGreater -> ">"
+    | OpLessEq -> "<="
+    | OpGreaterEq -> ">="
+    | OpXor -> "^"
+
   type node =
     | AtmValue of atm
     | AtmFunction of string * atm list
-    | AtmOp of operator * atm * atm
+    | AtmOp of math_op * atm * atm
+    | AtmIf of atm * node * node
     | Let of string * node * node
+    | Sequence of node * node
 
-  let remove_complex_operands expr =
-    
-end *)
+  type simplified = Node of node | Atm of atm
 
-(*
-module MonadicRacket = struct
-  type atm = Int of int | Var of string
-
-  type node =
-    | Atm of atm
-    | Read
-    | UnMinus of atm
-    | BinMinus of atm * atm
-    | Plus of atm * atm
-    | Let of string * node * node
-
-  let remove_complex_operands input =
-    let rec remove_complex_operands_inner count (expr : racket_clear_node) :
-        node * int =
+  let rec remove_complex_operands variables count expr =
+    let simplify_argument variables count expr =
       match expr with
-      | RkCApplication (name, args) -> (
-          match name with
-          | "-" -> (
-              match args with
-              | [ value ] -> (
-                  match value with
-                  | RkCVar name -> (UnMinus (Var name), count)
-                  | RkCValueNumber value -> (UnMinus (Int value), count)
-                  | other ->
-                      let expr', count' =
-                        remove_complex_operands_inner count other
-                      in
-                      let new_name = Printf.sprintf "tmp.%d" count' in
-                      (Let (new_name, expr', UnMinus (Var new_name)), count' + 1)
-                  )
-              | [ lhs; rhs ] -> (
-                  match lhs with
-                  | RkCVar l_name -> (
-                      match rhs with
-                      | RkCVar r_name ->
-                          (BinMinus (Var l_name, Var r_name), count)
-                      | RkCValueNumber r_val ->
-                          (BinMinus (Var l_name, Int r_val), count)
-                      | _ ->
-                          let rhs', count' =
-                            remove_complex_operands_inner count rhs
-                          in
-                          let r_name = Printf.sprintf "tmp.%d" count' in
-                          ( Let (r_name, rhs', BinMinus (Var l_name, Var r_name)),
-                            count' + 1 ))
-                  | RkCValueNumber l_val -> (
-                      match rhs with
-                      | RkCVar r_name ->
-                          (BinMinus (Int l_val, Var r_name), count)
-                      | RkCValueNumber r_val ->
-                          (BinMinus (Int l_val, Int r_val), count)
-                      | _ ->
-                          let rhs', count' =
-                            remove_complex_operands_inner count rhs
-                          in
-                          let r_name = Printf.sprintf "tmp.%d" count' in
-                          ( Let (r_name, rhs', BinMinus (Int l_val, Var r_name)),
-                            count' + 1 ))
-                  | _ -> (
-                      let lhs', count' =
-                        remove_complex_operands_inner count lhs
-                      in
-                      let l_name, count'' =
-                        (Printf.sprintf "tmp.%d" count', count' + 1)
-                      in
-                      match rhs with
-                      | RkCVar r_name ->
-                          ( Let (l_name, lhs', BinMinus (Var l_name, Var r_name)),
-                            count'' )
-                      | RkCValueNumber r_val ->
-                          ( Let (l_name, lhs', BinMinus (Var l_name, Int r_val)),
-                            count'' )
-                      | _ ->
-                          let rhs', count''' =
-                            remove_complex_operands_inner count'' rhs
-                          in
-                          let r_name = Printf.sprintf "tmp.%d" count''' in
-                          ( Let
-                              ( l_name,
-                                lhs',
-                                Let
-                                  ( r_name,
-                                    rhs',
-                                    BinMinus (Var l_name, Var r_name) ) ),
-                            count''' + 1 )))
-              | _ -> failwith "unreachable")
-          | "+" -> (
-              match args with
-              | [ lhs; rhs ] -> (
-                  match lhs with
-                  | RkCVar l_name -> (
-                      match rhs with
-                      | RkCVar r_name -> (Plus (Var l_name, Var r_name), count)
-                      | RkCValueNumber r_val ->
-                          (Plus (Var l_name, Int r_val), count)
-                      | _ ->
-                          let rhs', count' =
-                            remove_complex_operands_inner count rhs
-                          in
-                          let r_name = Printf.sprintf "tmp.%d" count' in
-                          ( Let (r_name, rhs', Plus (Var l_name, Var r_name)),
-                            count' + 1 ))
-                  | RkCValueNumber l_val -> (
-                      match rhs with
-                      | RkCVar r_name -> (Plus (Int l_val, Var r_name), count)
-                      | RkCValueNumber r_val ->
-                          (Plus (Int l_val, Int r_val), count)
-                      | _ ->
-                          let rhs', count' =
-                            remove_complex_operands_inner count rhs
-                          in
-                          let r_name = Printf.sprintf "tmp.%d" count' in
-                          ( Let (r_name, rhs', Plus (Int l_val, Var r_name)),
-                            count' + 1 ))
-                  | _ -> (
-                      let lhs', count' =
-                        remove_complex_operands_inner count lhs
-                      in
-                      let l_name, count'' =
-                        (Printf.sprintf "tmp.%d" count', count' + 1)
-                      in
-                      match rhs with
-                      | RkCVar r_name ->
-                          ( Let (l_name, lhs', Plus (Var l_name, Var r_name)),
-                            count'' )
-                      | RkCValueNumber r_val ->
-                          ( Let (l_name, lhs', Plus (Var l_name, Int r_val)),
-                            count'' )
-                      | _ ->
-                          let rhs', count''' =
-                            remove_complex_operands_inner count'' rhs
-                          in
-                          let r_name = Printf.sprintf "tmp.%d" count''' in
-                          ( Let
-                              ( l_name,
-                                lhs',
-                                Let (r_name, rhs', Plus (Var l_name, Var r_name))
-                              ),
-                            count''' + 1 )))
-              | _ -> failwith "unreachable")
-          | "read" -> (Read, count)
-          | _ -> failwith "unreachable")
-      | RkCLet (name, value, expr) ->
-          let value', count' = remove_complex_operands_inner count value in
-          let expr', count'' = remove_complex_operands_inner count' expr in
-          (Let (name, value', expr'), count'')
-      | RkCValueNumber value -> (Atm (Int value), count)
-      | RkCVar name -> (Atm (Var name), count)
+      | Uniquify.TmLit lit ->
+          ( Atm
+              (match lit with
+              | Parser.LitBool value -> AtmBool value
+              | Parser.LitNumber value -> AtmInt value),
+            count )
+      | Uniquify.TmApp (name, _) ->
+          if StringMap.mem name variables then (Atm (AtmVar name), count)
+          else
+            let node, count = remove_complex_operands variables count expr in
+            (Node node, count)
+      | other ->
+          let node, count = remove_complex_operands variables count other in
+          (Node node, count)
     in
-    match remove_complex_operands_inner 0 input with res, _ -> res
-
-  let rec format node =
-    let format_atm value =
-      match value with Var name -> name | Int number -> string_of_int number
+    let create_let expr result =
+      match expr with
+      | Atm expr, count -> result expr count
+      | Node expr, count ->
+          let arg_name = Printf.sprintf "tmp.%d" count in
+          let result, count = result (AtmVar arg_name) (count + 1) in
+          (Let (arg_name, expr, result), count)
     in
-    match node with
-    | Atm value -> format_atm value
-    | Read -> "(read)"
-    | UnMinus expr -> "(- " ^ format_atm expr ^ ")"
-    | BinMinus (lhs, rhs) -> "(- " ^ format_atm lhs ^ " " ^ format_atm rhs ^ ")"
-    | Plus (lhs, rhs) -> "(+ " ^ format_atm lhs ^ " " ^ format_atm rhs ^ ")"
-    | Let (name, value, expr) ->
-        let value' = format value in
-        let expr' = format expr in
-        "(let ([" ^ name ^ " " ^ value' ^ "]) " ^ expr' ^ ")"
+    match expr with
+    | Uniquify.TmLit lit ->
+        ( (match lit with
+          | Parser.LitBool value -> AtmValue (AtmBool value)
+          | Parser.LitNumber value -> AtmValue (AtmInt value)),
+          count )
+    | Uniquify.TmApp (name, args) ->
+        if StringMap.mem name variables then (AtmValue (AtmVar name), count)
+        else
+          let rec simplify_function variables name args prev_args count =
+            match args with
+            | [] -> (AtmFunction (name, List.rev prev_args), count)
+            | arg :: rest ->
+                create_let (simplify_argument variables count arg)
+                  (fun atm count ->
+                    simplify_function variables name rest (atm :: prev_args)
+                      count)
+          in
+          simplify_function variables name args [] count
+    | Uniquify.TmOp (op, lhs, rhs) -> (
+        match op with
+        | OpSemicolon ->
+            let lhs, count = remove_complex_operands variables count lhs in
+            let rhs, count = remove_complex_operands variables count rhs in
+            (Sequence (lhs, rhs), count)
+        | op ->
+            create_let (simplify_argument variables count lhs) (fun lhs count ->
+                match op with
+                | Parser.OpAnd ->
+                    let rhs, count =
+                      remove_complex_operands variables count rhs
+                    in
+                    (AtmIf (lhs, rhs, AtmValue (AtmBool false)), count)
+                | Parser.OpOr ->
+                    let rhs, count =
+                      remove_complex_operands variables count rhs
+                    in
+                    (AtmIf (lhs, rhs, AtmValue (AtmBool false)), count)
+                | other ->
+                    let op =
+                      match other with
+                      | Parser.OpAdd -> OpAdd
+                      | Parser.OpSub -> OpSub
+                      | Parser.OpMul -> OpMul
+                      | Parser.OpDiv -> OpDiv
+                      | Parser.OpEq -> OpEq
+                      | Parser.OpNe -> OpNe
+                      | Parser.OpLess -> OpLess
+                      | Parser.OpGreater -> OpGreater
+                      | Parser.OpLessEq -> OpLessEq
+                      | Parser.OpGreaterEq -> OpGreaterEq
+                      | Parser.OpXor -> OpXor
+                      | _ -> failwith "unreachable"
+                    in
+                    create_let (simplify_argument variables count rhs)
+                      (fun rhs count -> (AtmOp (op, lhs, rhs), count))))
+    | Uniquify.TmLet (name, value, expr) ->
+        let value, count = remove_complex_operands variables count value in
+        let variables = StringMap.add name true variables in
+        let expr, count = remove_complex_operands variables count expr in
+        (Let (name, value, expr), count)
+    | Uniquify.TmIf (cond, lhs, rhs) ->
+        create_let (simplify_argument variables count cond) (fun cond count ->
+            let lhs, count = remove_complex_operands variables count lhs in
+            let rhs, count = remove_complex_operands variables count rhs in
+            (AtmIf (cond, lhs, rhs), count))
 end
 
 module ExplicateControl = struct
-  type atm = MonadicRacket.atm
+  open Monadic
 
   type exp =
     | Atm of atm
-    | Read
-    | UnMinus of atm
-    | BinMinus of atm * atm
-    | Plus of atm * atm
+    | Function of string * atm list
+    | Operator of math_op * atm * atm
 
-  type stmt = Return of exp | Assign of string * exp
+  type stmt =
+    | Assign of string * exp
+    | Return of exp
+    | CMov of atm * int
+    | Jmp of int
+    | Label of int
 
-  let order expr =
-    let rec order_inner (name : string option) expr names =
-      match expr with
-      | MonadicRacket.Let (new_name, value, expr) ->
-          let assignment, names' = order_inner (Some new_name) value names in
-          let expr_result, names'' = order_inner name expr names' in
-          (List.append assignment expr_result, names'')
-      | other -> (
-          let result_expr =
-            match other with
-            | MonadicRacket.Atm value -> Atm value
-            | MonadicRacket.BinMinus (lhs, rhs) -> BinMinus (lhs, rhs)
-            | MonadicRacket.UnMinus value -> UnMinus value
-            | MonadicRacket.Plus (lhs, rhs) -> Plus (lhs, rhs)
-            | _ -> Read
-          in
-          match name with
-          | Some name ->
-              ( [ Assign (name, result_expr) ],
-                if StringMap.mem name names then names
-                else StringMap.add name (StringMap.cardinal names) names )
-          | None -> ([ Return result_expr ], names))
+  let rec explicate_control expr name count =
+    let return_expr name expr =
+      ( (match name with
+        | None -> [ Return expr ]
+        | Some name -> [ Assign (name, expr) ]),
+        count )
     in
-    order_inner None expr StringMap.empty
+    match expr with
+    | AtmValue atm ->
+        let expr = Atm atm in
+        return_expr name expr
+    | AtmFunction (func, args) ->
+        let expr = Function (func, args) in
+        return_expr name expr
+    | AtmOp (op, lhs, rhs) ->
+        let expr = Operator (op, lhs, rhs) in
+        return_expr name expr
+    | AtmIf (cond, lhs, rhs) ->
+        let lhs, count = explicate_control lhs name count in
+        let rhs, count = explicate_control rhs name count in
+        let cond = CMov (cond, count) in
+        let inter_jmp = Jmp (count + 1) in
+        let inter_label = Label count in
+        let end_label = Label (count + 1) in
+        ( List.concat
+            [ [ cond ]; rhs; [ inter_jmp; inter_label ]; lhs; [ end_label ] ],
+          count + 2 )
+    | Let (new_name, value, expr) ->
+        let value, count = explicate_control value (Some new_name) count in
+        let expr, count = explicate_control expr name count in
+        (List.append value expr, count)
+    | Sequence (lhs, rhs) ->
+        let lhs, count = explicate_control lhs None count in
+        let rhs, count = explicate_control rhs name count in
+        (List.append lhs rhs, count)
 
-  let format statement =
-    let format_expr expr =
-      let format_atm atm =
-        match atm with
-        | MonadicRacket.Int number -> string_of_int number
-        | MonadicRacket.Var name -> name
-      in
-      match expr with
-      | Atm value -> format_atm value
-      | Read -> "(read)"
-      | UnMinus value -> "-" ^ format_atm value
-      | BinMinus (lhs, rhs) -> format_atm lhs ^ " - " ^ format_atm rhs
-      | Plus (lhs, rhs) -> format_atm lhs ^ " + " ^ format_atm rhs
-    in
-    match statement with
-    | Return expr -> "return " ^ format_expr expr
-    | Assign (name, expr) -> name ^ " = " ^ format_expr expr
+  let format_atm atm =
+    match atm with
+    | AtmVar name -> name
+    | AtmInt num -> string_of_int num
+    | AtmBool bool -> string_of_bool bool
+
+  let format_exp expr =
+    match expr with
+    | Atm atm -> format_atm atm
+    | Function (name, atms) ->
+        Printf.sprintf "%s(%s)" name
+          (String.concat ", " (List.map format_atm atms))
+    | Operator (op, lhs, rhs) ->
+        Printf.sprintf "%s %s %s" (format_atm lhs) (print_math_op op)
+          (format_atm rhs)
+
+  let format_statement stmt =
+    match stmt with
+    | Assign (name, expr) -> Printf.sprintf "  %s <- %s" name (format_exp expr)
+    | Return expr -> Printf.sprintf "  return %s" (format_exp expr)
+    | CMov (cond, idx) -> Printf.sprintf "  if %s go %d" (format_atm cond) idx
+    | Jmp idx -> Printf.sprintf "  jmp %d" idx
+    | Label idx -> Printf.sprintf "label%d:" idx
 end
 
+module AsmGenerator = struct
+  type reg =
+    | X0
+    | X1
+    | X2
+    | X3
+    | X4
+    | X5
+    | X6
+    | X7
+    | X8
+    | X9
+    | X10
+    | X11
+    | X12
+    | X13
+    | X14
+    | X15
+    | X16
+    | X17
+    | X18
+    | X19
+    | X20
+    | X21
+    | X22
+    | X23
+    | X24
+    | X25
+    | X26
+    | X27
+    | X28
+    | X29
+    | X30
+    | SP of int
+
+  type cmd =
+    | STP of reg * reg * int
+    | STR of reg * int
+    | LDP of reg * reg * int
+    | LDR of reg * int
+    | SUBSP of int
+    | ADDSP of int
+    | ADD of reg * reg * reg
+    | SUB of reg * reg * reg
+end
+
+(*
 module AsmGenerator = struct
   type reg = X19 | X20 | X21 | X22 | X23 | X24 | X25 | X26 | X27 | X28
   type atm = Reg of reg | Num of int

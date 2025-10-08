@@ -41,7 +41,6 @@ let print_operator operator =
   | OpOr -> "||"
   | OpXor -> "^"
   | OpSemicolon -> ";"
-  
 
 type type_expr =
   | TyInt of position
