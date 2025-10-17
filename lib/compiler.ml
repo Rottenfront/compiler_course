@@ -296,352 +296,390 @@ module ExplicateControl = struct
     | Label idx -> Printf.sprintf "label%d:" idx
 end
 
-module AsmGenerator = struct
+module AssignHomes = struct
   open Monadic
   open ExplicateControl
 
-  let add_line acc s = acc := !acc ^ s ^ "\n"
-  let caller_arg_regs = [ "x0"; "x1"; "x2"; "x3"; "x4"; "x5"; "x6"; "x7" ]
+  (* there should be parameters already *)
+  let rec analyze_variable_use statements variables =
+    let analyze_atm atm variables =
+      match atm with
+      | AtmVar var ->
+          StringMap.update var (Option.map (fun x -> x + 1)) variables
+      | _ -> variables
+    in
+    let analyze_expression expr variables =
+      match expr with
+      | Atm atm -> analyze_atm atm variables
+      | Function (name, atms) ->
+          AtmVar name :: atms
+          |> List.fold_left (fun acc atm -> analyze_atm atm acc) variables
+      | Operator (_, lhs, rhs) ->
+          [ lhs; rhs ]
+          |> List.fold_left (fun acc atm -> analyze_atm atm acc) variables
+    in
+    match statements with
+    | Assign (new_variable, expr) :: rest ->
+        variables
+        |> StringMap.add new_variable 1
+        |> analyze_expression expr |> analyze_variable_use rest
+    | Return expr :: rest ->
+        variables |> analyze_expression expr |> analyze_variable_use rest
+    | CMov (atm, _) :: rest ->
+        variables |> analyze_atm atm |> analyze_variable_use rest
+    | _ :: rest -> analyze_variable_use rest variables
+    | [] -> variables
+
   let temp_regs = [ "x9"; "x10"; "x11"; "x12"; "x13"; "x14"; "x15" ]
 
-  let scratch_reg =
-    "x16" (* used transiently for memory <-> register moves when needed *)
+  type reg = Reg of string | Stack of int
 
-  let align16 n = (n + 15) / 16 * 16
-
-  let collect_locals params stmts =
-    let set = Hashtbl.create 16 in
-    List.iter (fun p -> Hashtbl.replace set p ()) params;
-    List.iter
-      (function Assign (v, _) -> Hashtbl.replace set v () | _ -> ())
-      stmts;
-    Hashtbl.fold (fun k _ acc -> k :: acc) set []
-
-  let make_stack_layout locals =
-    let slot_size = 8 in
-    let rec assign acc idx = function
-      | [] -> List.rev acc
-      | name :: rest -> assign ((name, idx * slot_size) :: acc) (idx + 1) rest
-    in
-    assign [] 1 locals
-
-  let lookup_offset layout name =
-    try List.assoc name layout
-    with Not_found -> failwith ("Unknown local: " ^ name)
-
-  let label_name i = Format.sprintf "label%d" i
-
-  (* ----------------------
-   Two-pass analysis to compute precise spill area
-   ----------------------
-   We compute the maximum number of simultaneously live temporaries needed while
-   evaluating expressions under a left-to-right evaluation strategy. The algorithm
-   simulates the allocation pattern used by the emitter: evaluate left subtree fully,
-   leaving its result live in one temporary, then evaluate right subtree (which may
-   itself require temporaries while the left result occupies one). For function call
-   arguments, we evaluate left-to-right; each evaluated arg remains live until moved
-   into an argument register or stored to the preallocated arg stack area.
-*)
-
-  (* compute max temps needed by an expression *)
-  let max_temps_exp e =
-    match e with
-    | Atm _ -> 1
-    | Operator _ -> 2
-    | Function (_, args) -> List.length args
-
-  (* compute maximum temps needed across all statements *)
-  let max_temps_stmts stmts =
-    let rec loop acc = function
-      | [] -> acc
-      | Label _ :: rest | Jmp _ :: rest -> loop acc rest
-      | CMov _ :: rest -> loop (max acc 1) rest
-      | Assign (_, e) :: rest -> loop (max acc (max_temps_exp e)) rest
-      | Return e :: rest -> loop (max acc (max_temps_exp e)) rest
-    in
-    loop 0 stmts
-
-  (* ----------------------
-   Code emission with preallocated spill area
-   ----------------------
-   We will: perform analysis to get max_needed, compute num_spill_slots = max(0, max_needed - num_temp_regs)
-   Reserve spill slots inside the frame: spill_slot i is at [fp, #- (locals_bytes + 8*i)] (i from 1..num_spill_slots)
-
-   During emission, values can be represented by:
-     - Reg r
-     - Spill i  (meaning stored at spill slot index i)
-   When an operation requires a register, memory operands are loaded into a temporary register
-   (allocating from free temp_regs or reusing scratch_reg transiently).
-*)
-
-  type value_loc = Reg of string | Spill of int (* 1-based index *)
-
-  type emit_state = {
-    mutable free_regs : string list;
-    num_spill_slots : int;
-    spill_base_offset : int; (* bytes from fp to first spill slot (positive) *)
-    mutable next_spill_alloc : int;
-        (* next spill slot to use when we need to spill a live value *)
+  type assign_homes_context = {
+    variables : int StringMap.t;
+    register_table : string option StringMap.t;
+    stack_table : int StringMap.t;
+    free_stack : int list;
   }
 
-  let init_emit_state ~num_spill_slots ~spill_base_offset =
-    {
-      free_regs = temp_regs;
-      num_spill_slots;
-      spill_base_offset;
-      next_spill_alloc = 1;
-    }
-
-  let alloc_reg st =
-    match st.free_regs with
-    | r :: rest ->
-        st.free_regs <- rest;
-        Some r
-    | [] -> None
-
-  let free_reg st r = st.free_regs <- r :: st.free_regs
-
-  let alloc_spill_slot st =
-    if st.next_spill_alloc > st.num_spill_slots then
-      failwith "ran out of spill slots (logic error)";
-    let i = st.next_spill_alloc in
-    st.next_spill_alloc <- st.next_spill_alloc + 1;
-    i
-
-  (* helper to ensure a value is in a register; returns Reg r and ensures register is allocated and value loaded if needed. *)
-  let ensure_in_reg st out v =
-    match v with
-    | Reg r -> Reg r
-    | Spill i -> (
-        match alloc_reg st with
-        | Some r ->
-            (* load spill slot into r *)
-            let off = st.spill_base_offset + ((i - 1) * 8) in
-            add_line out (Format.sprintf "    ldr %s, [fp, #-%d]" r off);
-            Reg r
-        | None ->
-            (* No free regs: use scratch_reg to load, then store back into another spill slot
-              but this situation should be avoided because num_spill_slots computed from analysis.
-              For robustness, load into scratch and return Reg scratch. *)
-            let off = st.spill_base_offset + ((i - 1) * 8) in
-            add_line out
-              (Format.sprintf "    ldr %s, [fp, #-%d]" scratch_reg off);
-            Reg scratch_reg)
-
-  (* Compile atom yields a value_loc. It will allocate a register if available, otherwise write into spill slot. *)
-  let compile_atm layout st out atm =
-    match atm with
-    | AtmInt n -> (
-        match alloc_reg st with
-        | Some r ->
-            add_line out (Format.sprintf "    mov %s, #%d" r n);
-            Reg r
-        | None ->
-            let slot = alloc_spill_slot st in
-            let off = st.spill_base_offset + ((slot - 1) * 8) in
-            add_line out
-              (Format.sprintf "    mov %s, #%d\n    str %s, [fp, #-%d]"
-                 scratch_reg n scratch_reg off);
-            Spill slot)
-    | AtmBool b -> (
-        let v = if b then 1 else 0 in
-        match alloc_reg st with
-        | Some r ->
-            add_line out (Format.sprintf "    mov %s, #%d" r v);
-            Reg r
-        | None ->
-            let slot = alloc_spill_slot st in
-            let off = st.spill_base_offset + ((slot - 1) * 8) in
-            add_line out
-              (Format.sprintf "    mov %s, #%d\n    str %s, [fp, #-%d]"
-                 scratch_reg v scratch_reg off);
-            Spill slot)
-    | AtmVar name -> (
-        let off_local = lookup_offset layout name in
-        match alloc_reg st with
-        | Some r ->
-            add_line out (Format.sprintf "    ldr %s, [fp, #-%d]" r off_local);
-            Reg r
-        | None ->
-            let slot = alloc_spill_slot st in
-            let off = st.spill_base_offset + ((slot - 1) * 8) in
-            add_line out
-              (Format.sprintf "    ldr %s, [fp, #-%d]\n    str %s, [fp, #-%d]"
-                 scratch_reg off_local scratch_reg off);
-            Spill slot)
-
-  (* Compile binary op: ensure both operands are in registers, then emit instruction, free right reg and keep result in left reg. *)
-  let compile_binop st out op v1 v2 =
-    let rv1 =
-      match ensure_in_reg st out v1 with
-      | Reg r -> r
-      | _ -> failwith "ensure_in_reg returned non-reg"
+  (* first 8 arguments should be pushed into stack
+     rest should be with indices -2, -3, -4, etc.*)
+  let rec assign_homes statements context (homes : reg StringMap.t) =
+    let analyze_atm atm context =
+      match atm with
+      | AtmVar var ->
+          let variables =
+            StringMap.update var (Option.map (fun x -> x - 1)) context.variables
+          in
+          if StringMap.find var variables == 0 then
+            if
+              StringMap.exists
+                (fun _ variable -> variable == Some var)
+                context.register_table
+            then
+              {
+                variables;
+                register_table =
+                  StringMap.map
+                    (fun variable ->
+                      if variable == Some var then None else variable)
+                    context.register_table;
+                stack_table = context.stack_table;
+                free_stack = context.free_stack;
+              }
+            else
+              let stack_position = StringMap.find var context.stack_table in
+              {
+                variables;
+                register_table = context.register_table;
+                stack_table = StringMap.remove var context.stack_table;
+                free_stack = stack_position :: context.free_stack;
+              }
+          else { context with variables }
+      | _ -> context
     in
-    let rv2 =
-      match ensure_in_reg st out v2 with
-      | Reg r -> r
-      | _ -> failwith "ensure_in_reg returned non-reg"
+    let analyze_expression expr context =
+      match expr with
+      | Atm atm -> analyze_atm atm context
+      | Function (name, atms) ->
+          (if StringMap.mem name context.variables then AtmVar name :: atms
+           else atms)
+          |> List.fold_left (fun context atm -> analyze_atm atm context) context
+      | Operator (_, lhs, rhs) ->
+          [ lhs; rhs ]
+          |> List.fold_left (fun context atm -> analyze_atm atm context) context
     in
-    (match op with
-    | OpAdd -> add_line out (Format.sprintf "    add %s, %s, %s" rv1 rv1 rv2)
-    | OpSub -> add_line out (Format.sprintf "    sub %s, %s, %s" rv1 rv1 rv2)
-    | OpMul -> add_line out (Format.sprintf "    mul %s, %s, %s" rv1 rv1 rv2)
-    | OpDiv -> add_line out (Format.sprintf "    sdiv %s, %s, %s" rv1 rv1 rv2)
-    | OpXor -> add_line out (Format.sprintf "    eor %s, %s, %s" rv1 rv1 rv2)
-    | OpEq | OpNe | OpLess | OpGreater | OpLessEq | OpGreaterEq ->
-        add_line out (Format.sprintf "    cmp %s, %s" rv1 rv2);
-        let cond =
-          match op with
-          | OpEq -> "eq"
-          | OpNe -> "ne"
-          | OpLess -> "lt"
-          | OpGreater -> "gt"
-          | OpLessEq -> "le"
-          | OpGreaterEq -> "ge"
-          | _ -> assert false
+    match statements with
+    | [] -> homes
+    | Assign (new_variable, expr) :: rest ->
+        let context = analyze_expression expr context in
+        let context, homes =
+          if
+            StringMap.for_all
+              (fun _ variable -> variable != None)
+              context.register_table
+          then
+            let index =
+              if List.is_empty context.free_stack then
+                StringMap.fold
+                  (fun _ index max_index -> max max_index (index + 1))
+                  context.stack_table 1
+              else List.hd context.free_stack
+            in
+            ( {
+                context with
+                stack_table =
+                  StringMap.add new_variable index context.stack_table;
+              },
+              StringMap.add new_variable (Stack index) homes )
+          else
+            let reg =
+              StringMap.bindings context.register_table
+              |> List.filter (fun (_, var) -> var = None)
+              |> List.map fst |> List.hd
+            in
+            ( {
+                context with
+                register_table =
+                  StringMap.update reg
+                    (fun _ -> Some (Some new_variable))
+                    context.register_table;
+              },
+              StringMap.add new_variable (Reg reg) homes )
         in
-        let wreg = "w" ^ String.sub rv1 1 (String.length rv1 - 1) in
-        add_line out (Format.sprintf "    cset %s, %s" wreg cond);
-        add_line out (Format.sprintf "    uxtw %s, %s" rv1 wreg));
-    (* free rv2 register back to pool *)
-    free_reg st rv2;
-    Reg rv1
+        assign_homes rest context homes
+    | Return expr :: rest ->
+        let context = analyze_expression expr context in
+        assign_homes rest context homes
+    | CMov (atm, _) :: rest ->
+        let context = analyze_atm atm context in
+        assign_homes rest context homes
+    | _ :: rest -> assign_homes rest context homes
+end
 
-  (* Compile expression returning a value_loc *)
-  let rec compile_exp layout st out e =
-    match e with
-    | Atm a -> compile_atm layout st out a
-    | Operator (op, a1, a2) ->
-        let v1 = compile_exp layout st out (Atm a1) in
-        let v2 = compile_exp layout st out (Atm a2) in
-        compile_binop st out op v1 v2
-    | Function (fname, args) -> (
-        List.iteri
-          (fun i a ->
-            let v = compile_atm layout st out a in
-            match ensure_in_reg st out v with
-            | Reg r ->
-                if i < List.length caller_arg_regs then
-                  add_line out
-                    (Format.sprintf "    mov %s, %s"
-                       (List.nth caller_arg_regs i)
-                       r)
-                else
-                  let caller_stack_offset = 8 * (i - 8) in
-                  add_line out
-                    (Format.sprintf "    str %s, [sp, #%d]" r
-                       caller_stack_offset);
-                  (* free r after moving/storing *) free_reg st r
-            | _ -> failwith "unexpected non-reg after ensure_in_reg")
-          args;
-        add_line out (Format.sprintf "    bl _%s" fname);
-        match alloc_reg st with
-        | Some r ->
-            add_line out (Format.sprintf "    mov %s, x0" r);
-            Reg r
-        | None ->
-            let slot = alloc_spill_slot st in
-            let off = st.spill_base_offset + ((slot - 1) * 8) in
+module BasicInstructions = struct
+  open AssignHomes
+  open Monadic
+  open ExplicateControl
+
+  type basic_data = BasicReg of reg | BasicInt of int
+
+  type instruction =
+    | MovIns of reg * basic_data
+    | OpIns of reg * math_op * basic_data * basic_data
+    | FuncIns of reg * string * basic_data list
+    | CMovIns of basic_data * int
+    | JmpIns of int
+    | LblIns of int
+
+  let compile_statement statement homes =
+    let atm_to_basic_data atm =
+      match atm with
+      | AtmVar var -> BasicReg (StringMap.find var homes)
+      | AtmInt int -> BasicInt int
+      | AtmBool true -> BasicInt 1
+      | AtmBool false -> BasicInt 0
+    in
+    let compile_expression return expr =
+      match expr with
+      | Atm atm -> MovIns (return, atm_to_basic_data atm)
+      | Function (name, args) ->
+          FuncIns (return, name, List.map atm_to_basic_data args)
+      | Operator (op, lhs, rhs) ->
+          OpIns (return, op, atm_to_basic_data lhs, atm_to_basic_data rhs)
+    in
+    match statement with
+    | Assign (var, expr) -> compile_expression (StringMap.find var homes) expr
+    | Return expr -> compile_expression (Reg "x0") expr
+    | CMov (cond, label) -> CMovIns (atm_to_basic_data cond, label)
+    | Label label -> LblIns label
+    | Jmp label -> JmpIns label
+end
+
+module AsmGenerator = struct
+  open Monadic
+  open ExplicateControl
+  open BasicInstructions
+  open AssignHomes
+
+  let align16 n = (n + 15) / 16 * 16
+  let add_line acc s = acc := !acc ^ s ^ "\n"
+  let buffer_reg = "x16"
+  let second_buffer_reg = "x20"
+  let additional_buffer_reg = "x21"
+  let stack_position sp_shift index = sp_shift - (index * 8)
+
+  let compile_instruction out function_name sp_shift instruction =
+    match instruction with
+    | MovIns (dest, data) -> (
+        match dest with
+        | Reg dest -> (
+            match data with
+            | BasicInt int ->
+                Format.sprintf "    mov %s, %d" dest int |> add_line out
+            | BasicReg (Reg src) ->
+                Format.sprintf "    mov %s, %s" dest src |> add_line out
+            | BasicReg (Stack index) ->
+                Format.sprintf "    ldr %s, [sp, #%d]" dest
+                  (stack_position sp_shift index)
+                |> add_line out)
+        | Stack dest ->
+            let src =
+              match data with
+              | BasicInt int ->
+                  Format.sprintf "    mov %s, %d" buffer_reg int |> add_line out;
+                  buffer_reg
+              | BasicReg (Reg src) -> src
+              | BasicReg (Stack src) ->
+                  Format.sprintf "    ldr %s, [sp, #%d]" buffer_reg
+                    (stack_position sp_shift src)
+                  |> add_line out;
+                  buffer_reg
+            in
+            Format.sprintf "    str %s, [sp, #%d]" src
+              (stack_position sp_shift dest)
+            |> add_line out)
+    | OpIns (dest, op, lhs, rhs) -> (
+        let lhs =
+          match lhs with
+          | BasicInt int ->
+              Format.sprintf "    mov %s, %d" buffer_reg int |> add_line out;
+              buffer_reg
+          | BasicReg (Reg src) -> src
+          | BasicReg (Stack src) ->
+              Format.sprintf "    ldr %s, [sp, #%d]" buffer_reg
+                (stack_position sp_shift src)
+              |> add_line out;
+              buffer_reg
+        in
+        let rhs =
+          match rhs with
+          | BasicInt int ->
+              Format.sprintf "    mov %s, %d" additional_buffer_reg int
+              |> add_line out;
+              additional_buffer_reg
+          | BasicReg (Reg src) -> src
+          | BasicReg (Stack src) ->
+              Format.sprintf "    ldr %s, [sp, #%d]" additional_buffer_reg
+                (stack_position sp_shift src)
+              |> add_line out;
+              additional_buffer_reg
+        in
+        let compile_operator =
+         fun dest op ->
+          match op with
+          | OpAdd ->
+              add_line out (Format.sprintf "    add %s, %s, %s" dest lhs rhs)
+          | OpSub ->
+              add_line out (Format.sprintf "    sub %s, %s, %s" dest lhs rhs)
+          | OpMul ->
+              add_line out (Format.sprintf "    mul %s, %s, %s" dest lhs rhs)
+          | OpDiv ->
+              add_line out (Format.sprintf "    sdiv %s, %s, %s" dest lhs rhs)
+          | OpXor ->
+              add_line out (Format.sprintf "    eor %s, %s, %s" dest lhs rhs)
+          | OpEq | OpNe | OpLess | OpGreater | OpLessEq | OpGreaterEq ->
+              add_line out (Format.sprintf "    cmp %s, %s" lhs rhs);
+              let cond =
+                match op with
+                | OpEq -> "eq"
+                | OpNe -> "ne"
+                | OpLess -> "lt"
+                | OpGreater -> "gt"
+                | OpLessEq -> "le"
+                | OpGreaterEq -> "ge"
+                | _ -> assert false
+              in
+              add_line out (Format.sprintf "    cset %s, %s" dest cond)
+        in
+        match dest with
+        | Reg reg -> compile_operator reg op
+        | Stack index ->
+            compile_operator second_buffer_reg op;
             add_line out
-              (Format.sprintf "    mov %s, x0\n    str %s, [fp, #-%d]"
-                 scratch_reg scratch_reg off);
-            Spill slot)
-
-  let compile_stmts stmts layout num_spill_slots spill_base_offset out =
-    let st = init_emit_state ~num_spill_slots ~spill_base_offset in
-    let rec compile_stmt_list = function
-      | [] -> ()
-      | Label i :: rest ->
-          add_line out (Format.sprintf "%s:" (label_name i));
-          compile_stmt_list rest
-      | Jmp i :: rest ->
-          add_line out (Format.sprintf "    b %s" (label_name i));
-          compile_stmt_list rest
-      | CMov (atm, lbl) :: rest ->
-          let v = compile_atm layout st out atm in
-          (match ensure_in_reg st out v with
-          | Reg r ->
-              add_line out (Format.sprintf "    cbnz %s, %s" r (label_name lbl));
-              free_reg st r
-          | _ -> failwith "CMov: unexpected non-reg");
-          compile_stmt_list rest
-      | Assign (v, e) :: rest ->
-          let val_loc =
-            match e with
-            | Atm a -> compile_atm layout st out a
-            | _ -> compile_exp layout st out e
+              (Format.sprintf "    ldr %s, [sp, #%d]" second_buffer_reg
+                 (stack_position sp_shift index)))
+    | CMovIns (cond, label) ->
+        let cond =
+          match cond with
+          | BasicInt int ->
+              Format.sprintf "    mov %s, %d" additional_buffer_reg int
+              |> add_line out;
+              buffer_reg
+          | BasicReg (Reg src) -> src
+          | BasicReg (Stack src) ->
+              Format.sprintf "    ldr %s, [sp, #%d]" additional_buffer_reg
+                (stack_position sp_shift src)
+              |> add_line out;
+              buffer_reg
+        in
+        add_line out (Format.sprintf "    cbnz %s, label_%d" cond label)
+    | JmpIns label -> add_line out (Format.sprintf "    b label_%d" label)
+    | LblIns label -> add_line out (Format.sprintf "label_%d:" label)
+    | FuncIns (dest, name, args) ->
+        let load_arg =
+         fun shift dest arg ->
+          match arg with
+          | BasicReg (Reg src) ->
+              Format.sprintf "    mov %s, %s" dest src |> add_line out
+          | BasicReg (Stack src) ->
+              Format.sprintf "    ldr %s, [sp, #%d]" dest
+                (stack_position shift src)
+              |> add_line out
+          | BasicInt int ->
+              Format.sprintf "    mov %s, %d" dest int |> add_line out
+        in
+        (* tail recursion *)
+        List.take 8 args
+        |> List.mapi (fun index arg ->
+               load_arg sp_shift ("x" ^ string_of_int index) arg)
+        |> List.fold_left (fun _ _ -> ()) ();
+        if dest == Reg "x0" && name == function_name then (
+          if List.length args > 8 then (
+            let rest_args =
+              args |> List.rev |> List.take (List.length args - 8) |> List.rev
+            in
+            let shift = List.length rest_args |> ( * ) 8 |> align16 in
+            add_line out (Format.sprintf "    sub sp, sp, #%d" shift);
+            List.mapi
+              (fun index arg ->
+                load_arg (shift + sp_shift) buffer_reg arg;
+                add_line out
+                  (Format.sprintf "    str %s, [sp, #%d]" buffer_reg (index * 8)))
+              rest_args
+            |> List.fold_left (fun _ _ -> ()) ();
+            List.mapi
+              (fun index _ ->
+                add_line out
+                  (Format.sprintf "    ldr %s, [sp, #%d]" buffer_reg (index * 8));
+                add_line out
+                  (Format.sprintf "    str %s, [sp, #%d]" buffer_reg
+                     (stack_position (shift + sp_shift) (-1 - index))))
+              rest_args
+            |> List.fold_left (fun _ _ -> ()) ();
+            add_line out
+              (Format.sprintf "    add sp, sp, #%d" (shift + sp_shift)))
+          else add_line out (Format.sprintf "    add sp, sp, #%d" sp_shift);
+          add_line out (Format.sprintf "    b start_%s" function_name))
+        else if List.length args > 8 then (
+          let rest_args =
+            args |> List.rev |> List.take (List.length args - 8) |> List.rev
           in
-          (match ensure_in_reg st out val_loc with
-          | Reg r ->
-              let off = lookup_offset layout v in
-              add_line out (Format.sprintf "    str %s, [fp, #-%d]" r off);
-              free_reg st r
-          | _ -> failwith "Assign: unexpected non-reg after ensure_in_reg");
-          compile_stmt_list rest
-      | Return e :: _ -> (
-          let val_loc =
-            match e with
-            | Atm a -> compile_atm layout st out a
-            | _ -> compile_exp layout st out e
-          in
-          match ensure_in_reg st out val_loc with
-          | Reg r ->
-              add_line out (Format.sprintf "    mov x0, %s" r);
-              free_reg st r
-          | _ -> failwith "Return: unexpected non-reg after ensure_in_reg")
-    in
-    compile_stmt_list stmts
+          let shift = List.length rest_args |> align16 in
+          add_line out (Format.sprintf "    sub sp, sp, #%d" shift);
+          List.mapi
+            (fun index arg ->
+              load_arg (shift + sp_shift) buffer_reg arg;
+              add_line out
+                (Format.sprintf "    str %s, [sp, #%d]" buffer_reg (index * 8)))
+            rest_args
+          |> List.fold_left (fun _ _ -> ()) ();
+          add_line out (Format.sprintf "    bl _%s" name);
+          add_line out (Format.sprintf "    add sp, sp, #%d" shift))
+        else add_line out (Format.sprintf "    bl _%s" name)
 
-  (* Top-level compile: two-pass. First pass: compute max temps needed -> compute number of spill slots -> compute frame size. Second pass: emit code using offsets. *)
-  let compile_function ~name ~params ~stmts =
-    (* prepare locals layout (locals do not include spill slots) *)
-    let locals = collect_locals params stmts in
-    let layout = make_stack_layout locals in
-    (* analysis pass *)
-    let max_needed = max_temps_stmts stmts in
-    let num_temp_regs = List.length temp_regs in
-    let num_spill_slots = max 0 (max_needed - num_temp_regs) in
-    (* compute bytes: locals + stack_params + spill area + saved fp/lr *)
-    let num_locals = List.length layout in
-    let stack_params = max 0 (List.length params - 8) in
-    let locals_bytes = num_locals * 8 in
-    let stack_params_bytes = stack_params * 8 in
-    let spill_area_bytes = num_spill_slots * 8 in
-    let spill_base_offset = locals_bytes + 8 in
+  let compile_function name params instructions (homes : reg StringMap.t) =
     let frame_size =
-      align16 (locals_bytes + spill_area_bytes + stack_params_bytes + 16)
+      StringMap.fold
+        (fun _ home max_width ->
+          match home with Stack value -> max value max_width | _ -> max_width)
+        homes 0
+      |> ( * ) 8 |> align16
     in
-
-    (* emission pass *)
     let out = ref "" in
     add_line out ".text";
-    add_line out (Format.sprintf ".globl _%s" name);
-    add_line out (Format.sprintf "_%s:" name);
+    add_line out (".global _" ^ name);
+    add_line out ("_" ^ name ^ ":");
     add_line out "    stp fp, lr, [sp, #-16]!";
-    add_line out "    mov fp, sp";
+    add_line out ("start_" ^ name ^ ":");
     add_line out (Format.sprintf "    sub sp, sp, #%d" frame_size);
-    (* store incoming regs into locals *)
-    List.iteri
-      (fun i p ->
-        if List.mem p locals then
-          let off = lookup_offset layout p in
-          if i < 8 then
-            add_line out
-              (Format.sprintf "    str %s, [fp, #-%d]"
-                 (List.nth caller_arg_regs i)
-                 off)
-          else
-            add_line out
-              (Format.sprintf "    ldr x%d, [fp, #%d]\n    str x%d, [fp, #-%d]"
-                 i
-                 (((i - 8) * 8) + 16)
-                 i off))
-      params;
 
-    compile_stmts stmts layout num_spill_slots spill_base_offset out;
+    List.map
+      (fun instruction -> compile_instruction out name frame_size instruction)
+      instructions
+    |> List.fold_left (fun _ _ -> ()) ();
 
     add_line out (Format.sprintf "    add sp, sp, #%d" frame_size);
-    add_line out (Format.sprintf "    ldp fp, lr, [sp], #%d" 16);
+    add_line out "    ldp fp, lr, [sp], #16";
     add_line out "    ret";
     !out
 end
@@ -670,8 +708,15 @@ let rec compile_functions (functions : implementation list)
       in
       let expr, count = Monadic.remove_complex_operands params_map count expr in
       let stmts, _ = ExplicateControl.explicate_control expr None count in
+      let homes = AssignHomes.analyze_variable_use stmts params in
+      let instructions =
+        List.map
+          (fun stmt -> BasicInstructions.compile_statement stmt homes)
+          stmts
+      in
       let cons =
-        cons ^ "\n" ^ AsmGenerator.compile_function ~name ~params ~stmts
+        cons ^ "\n"
+        ^ AsmGenerator.compile_function name params instructions homes
       in
       compile_functions rest declarations count cons
 
