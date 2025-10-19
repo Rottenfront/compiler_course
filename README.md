@@ -51,6 +51,8 @@ Expression can be either:
   * OpOr -> "||"
   * OpXor -> "^"
   * OpSemicolon -> ";"
+- conditional branching
+  if <cond> then <expr> else <expr>
 - variable creation:
   ```
   let <name> = <expr> in <expr>
