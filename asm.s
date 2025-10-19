@@ -19,7 +19,7 @@ _print_bool:
 .global _print_int
 _print_int:
     stp fp, lr, [sp, #-16]!
-    mov x0, x19
+    mov x19, x0
     ADRP X0, fmt_int@PAGE
     ADD X0, X0, fmt_int@PAGEOFF
     STR x19, [SP, #-16]!
@@ -56,7 +56,7 @@ fmt_false:
     .asciz "false\n"
 .balign 4
 fmt_read:
-    .asciz "%lld\n"
+        .asciz "%lld"
 .balign 4
 fmt_int:
     .asciz "%lld\n"
@@ -64,39 +64,33 @@ fmt_int:
 num:    .quad 0
 
 .text
-.globl _main
+.global _main
 _main:
     stp fp, lr, [sp, #-16]!
-    mov fp, sp
-    sub sp, sp, #32
+start_main:
+    sub sp, sp, #16
     bl _read
-    mov x9, x0
-    str x9, [fp, #-16]
-    ldr x9, [fp, #-16]
-    mov x0, x9
+    str x0, [sp, #8]
+    ldr x0, [sp, #8]
     bl _square
-    mov x10, x0
-    str x10, [fp, #-8]
-    ldr x10, [fp, #-8]
-    mov x0, x10
+    str x0, [sp, #16]
+    ldr x0, [sp, #16]
     bl _print_int
-    mov x11, x0
-    mov x0, x11
-    add sp, sp, #32
+    mov x0, x0
+    add sp, sp, #16
     ldp fp, lr, [sp], #16
     ret
 
 .text
-.globl _square
+.global _square
 _square:
     stp fp, lr, [sp, #-16]!
-    mov fp, sp
-    sub sp, sp, #32
-    str x0, [fp, #-8]
-    ldr x9, [fp, #-8]
-    ldr x10, [fp, #-8]
-    mul x9, x9, x10
-    mov x0, x9
-    add sp, sp, #32
+start_square:
+    sub sp, sp, #16
+    str x0, [sp, #8]
+    ldr x16, [sp, #8]
+    ldr x21, [sp, #8]
+    mul x0, x16, x21
+    add sp, sp, #16
     ldp fp, lr, [sp], #16
     ret

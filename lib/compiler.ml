@@ -477,7 +477,6 @@ end
 
 module AsmGenerator = struct
   open Monadic
-  open ExplicateControl
   open BasicInstructions
   open AssignHomes
 
@@ -486,9 +485,9 @@ module AsmGenerator = struct
   let buffer_reg = "x16"
   let second_buffer_reg = "x20"
   let additional_buffer_reg = "x21"
-  let stack_position sp_shift index = sp_shift - (index * 8)
+  let stack_position sp_shift index = (index * 8) - sp_shift
 
-  let compile_instruction out function_name sp_shift instruction =
+  let compile_instruction out function_name instruction =
     match instruction with
     | MovIns (dest, data) -> (
         match dest with
@@ -500,7 +499,7 @@ module AsmGenerator = struct
                 Format.sprintf "    mov %s, %s" dest src |> add_line out
             | BasicReg (Stack index) ->
                 Format.sprintf "    ldr %s, [sp, #%d]" dest
-                  (stack_position sp_shift index)
+                  (stack_position 0 index)
                 |> add_line out)
         | Stack dest ->
             let src =
@@ -511,12 +510,11 @@ module AsmGenerator = struct
               | BasicReg (Reg src) -> src
               | BasicReg (Stack src) ->
                   Format.sprintf "    ldr %s, [sp, #%d]" buffer_reg
-                    (stack_position sp_shift src)
+                    (stack_position 0 src)
                   |> add_line out;
                   buffer_reg
             in
-            Format.sprintf "    str %s, [sp, #%d]" src
-              (stack_position sp_shift dest)
+            Format.sprintf "    str %s, [sp, #%d]" src (stack_position 0 dest)
             |> add_line out)
     | OpIns (dest, op, lhs, rhs) -> (
         let lhs =
@@ -527,7 +525,7 @@ module AsmGenerator = struct
           | BasicReg (Reg src) -> src
           | BasicReg (Stack src) ->
               Format.sprintf "    ldr %s, [sp, #%d]" buffer_reg
-                (stack_position sp_shift src)
+                (stack_position 0 src)
               |> add_line out;
               buffer_reg
         in
@@ -540,7 +538,7 @@ module AsmGenerator = struct
           | BasicReg (Reg src) -> src
           | BasicReg (Stack src) ->
               Format.sprintf "    ldr %s, [sp, #%d]" additional_buffer_reg
-                (stack_position sp_shift src)
+                (stack_position 0 src)
               |> add_line out;
               additional_buffer_reg
         in
@@ -577,7 +575,7 @@ module AsmGenerator = struct
             compile_operator second_buffer_reg op;
             add_line out
               (Format.sprintf "    ldr %s, [sp, #%d]" second_buffer_reg
-                 (stack_position sp_shift index)))
+                 (stack_position 0 index)))
     | CMovIns (cond, label) ->
         let cond =
           match cond with
@@ -588,7 +586,7 @@ module AsmGenerator = struct
           | BasicReg (Reg src) -> src
           | BasicReg (Stack src) ->
               Format.sprintf "    ldr %s, [sp, #%d]" additional_buffer_reg
-                (stack_position sp_shift src)
+                (stack_position 0 src)
               |> add_line out;
               buffer_reg
         in
@@ -611,7 +609,7 @@ module AsmGenerator = struct
         (* tail recursion *)
         List.take 8 args
         |> List.mapi (fun index arg ->
-               load_arg sp_shift ("x" ^ string_of_int index) arg)
+               load_arg 0 ("x" ^ string_of_int index) arg)
         |> List.fold_left (fun _ _ -> ()) ();
         if dest == Reg "x0" && name == function_name then (
           if List.length args > 8 then (
@@ -622,7 +620,7 @@ module AsmGenerator = struct
             add_line out (Format.sprintf "    sub sp, sp, #%d" shift);
             List.mapi
               (fun index arg ->
-                load_arg (shift + sp_shift) buffer_reg arg;
+                load_arg shift buffer_reg arg;
                 add_line out
                   (Format.sprintf "    str %s, [sp, #%d]" buffer_reg (index * 8)))
               rest_args
@@ -633,29 +631,34 @@ module AsmGenerator = struct
                   (Format.sprintf "    ldr %s, [sp, #%d]" buffer_reg (index * 8));
                 add_line out
                   (Format.sprintf "    str %s, [sp, #%d]" buffer_reg
-                     (stack_position (shift + sp_shift) (-1 - index))))
+                     (stack_position shift (-1 - index))))
               rest_args
             |> List.fold_left (fun _ _ -> ()) ();
-            add_line out
-              (Format.sprintf "    add sp, sp, #%d" (shift + sp_shift)))
-          else add_line out (Format.sprintf "    add sp, sp, #%d" sp_shift);
+            add_line out (Format.sprintf "    add sp, sp, #%d" shift))
+          else ();
           add_line out (Format.sprintf "    b start_%s" function_name))
-        else if List.length args > 8 then (
-          let rest_args =
-            args |> List.rev |> List.take (List.length args - 8) |> List.rev
-          in
-          let shift = List.length rest_args |> align16 in
-          add_line out (Format.sprintf "    sub sp, sp, #%d" shift);
-          List.mapi
-            (fun index arg ->
-              load_arg (shift + sp_shift) buffer_reg arg;
+        else (
+          if List.length args > 8 then (
+            let rest_args =
+              args |> List.rev |> List.take (List.length args - 8) |> List.rev
+            in
+            let shift = List.length rest_args |> align16 in
+            add_line out (Format.sprintf "    sub sp, sp, #%d" shift);
+            List.mapi
+              (fun index arg ->
+                load_arg shift buffer_reg arg;
+                add_line out
+                  (Format.sprintf "    str %s, [sp, #%d]" buffer_reg (index * 8)))
+              rest_args
+            |> List.fold_left (fun _ _ -> ()) ();
+            add_line out (Format.sprintf "    bl _%s" name);
+            add_line out (Format.sprintf "    add sp, sp, #%d" shift))
+          else add_line out (Format.sprintf "    bl _%s" name);
+          match dest with
+          | Stack index ->
               add_line out
-                (Format.sprintf "    str %s, [sp, #%d]" buffer_reg (index * 8)))
-            rest_args
-          |> List.fold_left (fun _ _ -> ()) ();
-          add_line out (Format.sprintf "    bl _%s" name);
-          add_line out (Format.sprintf "    add sp, sp, #%d" shift))
-        else add_line out (Format.sprintf "    bl _%s" name)
+                (Format.sprintf "    str x0, [sp, #%d]" (stack_position 0 index))
+          | Reg reg -> add_line out (Format.sprintf "    mov %s, x0" reg))
 
   let compile_function name params instructions (homes : reg StringMap.t) =
     let frame_size =
@@ -673,8 +676,18 @@ module AsmGenerator = struct
     add_line out ("start_" ^ name ^ ":");
     add_line out (Format.sprintf "    sub sp, sp, #%d" frame_size);
 
+    List.take 8 params
+    |> List.fold_left
+         (fun index _ ->
+           add_line out
+             (Format.sprintf "    str x%d, [sp, #%d]" index ((index + 1) * 8));
+           index + 1)
+         0
+    |> fun _ ->
+    ();
+
     List.map
-      (fun instruction -> compile_instruction out name frame_size instruction)
+      (fun instruction -> compile_instruction out name instruction)
       instructions
     |> List.fold_left (fun _ _ -> ()) ();
 
@@ -708,7 +721,46 @@ let rec compile_functions (functions : implementation list)
       in
       let expr, count = Monadic.remove_complex_operands params_map count expr in
       let stmts, _ = ExplicateControl.explicate_control expr None count in
-      let homes = AssignHomes.analyze_variable_use stmts params in
+      let params_map =
+        params |> List.map (fun param -> (param, 0)) |> StringMap.of_list
+      in
+      let variables = AssignHomes.analyze_variable_use stmts params_map in
+      let stack_list =
+        List.take 8 params
+        |> List.fold_left_map (fun index name -> (index + 1, (name, index))) 1
+        |> snd
+        |> List.append
+             (List.drop 8 params
+             |> List.fold_left_map
+                  (fun index name -> (index - 1, (name, index)))
+                  (-2)
+             |> snd)
+        |> StringMap.of_list
+      in
+      let homes =
+        StringMap.map (fun index -> AssignHomes.Stack index) stack_list
+      in
+      let homes =
+        AssignHomes.assign_homes stmts
+          {
+            variables;
+            register_table = StringMap.empty;
+            stack_table = stack_list;
+            free_stack = [];
+          }
+          homes
+      in
+      (StringMap.mapi
+         (fun name reg ->
+           print_string (name ^ ": ");
+           (match reg with
+           | AssignHomes.Reg reg -> print_string ("reg " ^ reg)
+           | AssignHomes.Stack index ->
+               print_string ("sp #" ^ string_of_int index));
+           print_endline "")
+         homes
+      |> StringMap.fold (fun _ _ _ -> ()))
+        ();
       let instructions =
         List.map
           (fun stmt -> BasicInstructions.compile_statement stmt homes)
@@ -723,228 +775,88 @@ let rec compile_functions (functions : implementation list)
 let compile_code code =
   let builtin_functions = [ "read"; "print_int"; "print_bool" ] in
   let functions, _ = code |> Lexer.lexer |> Parser.parse_stmts [] [] in
-  let declarations, functions = Result.get_ok functions in
-  let declarations =
-    declarations
-    |> List.map (fun (decl : declaration) -> decl.name.str)
-    |> List.append builtin_functions
-  in
-  let builtin =
-    "\n\
-     .text\n\
-     .global _print_bool\n\
-     _print_bool:\n\
-    \    stp fp, lr, [sp, #-16]!\n\
-    \    sub sp, sp, #16\n\
-    \    cmp w0, #0\n\
-    \    adrp x0, fmt_false@PAGE\n\
-    \    add  x0, x0, fmt_false@PAGEOFF\n\
-    \    b.eq 1f\n\
-    \    adrp x0, fmt_true@PAGE\n\
-    \    add  x0, x0, fmt_true@PAGEOFF\n\
-     1:\n\
-    \    bl _printf\n\
-    \    add sp, sp, #16\n\
-    \    ldp fp, lr, [sp], #16\n\
-    \    ret\n\n\
-     .text\n\
-     .global _print_int\n\
-     _print_int:\n\
-    \    stp fp, lr, [sp, #-16]!\n\
-    \    mov x0, x19\n\
-    \    ADRP X0, fmt_int@PAGE\n\
-    \    ADD X0, X0, fmt_int@PAGEOFF\n\
-    \    STR x19, [SP, #-16]!\n\
-    \    BL  _printf\n\
-    \    ADD SP, SP, #16\n\
-    \    ldp fp, lr, [sp], #16\n\
-    \    ret\n\n\
-     .text\n\
-     .global _read\n\
-     _read:\n\
-    \    stp fp, lr, [sp, #-16]!\n\
-    \    adrp x0, fmt_read@PAGE\n\
-    \    add x0, x0, fmt_read@PAGEOFF\n\
-    \    adrp x11, num@PAGE\n\
-    \    add x11, x11, num@PAGEOFF\n\
-    \    str x11, [SP, #-16]!\n\
-    \    bl _scanf\n\
-    \    add sp, sp, #16\n\
-    \    adrp x11, num@PAGE\n\
-    \    add x11, x11, num@PAGEOFF\n\
-    \    ldr x0, [x11]\n\
-    \    ldp fp, lr, [sp], #16\n\
-    \    ret\n\n\n\
-     .data\n\n\
-     .balign 4\n\
-     fmt_true:\n\
-    \    .asciz \"true\\n\"\n\
-     .balign 4\n\
-     fmt_false:\n\
-    \    .asciz \"false\\n\"\n\
-     .balign 4\n\
-     fmt_read:\n\
-    \    .asciz \"%lld\\n\"\n\
-     .balign 4\n\
-     fmt_int:\n\
-    \    .asciz \"%lld\\n\"\n\
-     .balign 4\n\
-     num:    .quad 0\n\
-    \      "
-  in
-  compile_functions functions declarations 0 builtin
-(*
-module AsmGenerator = struct
-  type reg = X19 | X20 | X21 | X22 | X23 | X24 | X25 | X26 | X27 | X28
-  type atm = Reg of reg | Num of int
-
-  type stmt =
-    | Mov of reg * atm
-    | Add of reg * atm * atm
-    | Sub of reg * atm * atm
-    | Store of int * reg
-    | Load of int * reg
-    | Read of reg
-    | Result of reg
-
-  let compile statements names =
-    let compile_statement statement names =
-      let compile_expr expression names =
-        match expression with
-        | ExplicateControl.Atm atm -> (
-            match atm with
-            | MonadicRacket.Int number -> [ Mov (X19, Num number) ]
-            | MonadicRacket.Var name ->
-                [ Load (StringMap.find name names, X19) ])
-        | ExplicateControl.Read -> [ Read X19 ]
-        | ExplicateControl.UnMinus atm ->
-            [
-              (match atm with
-              | MonadicRacket.Int number -> Mov (X19, Num number)
-              | MonadicRacket.Var name -> Load (StringMap.find name names, X19));
-              Mov (X20, Num 0);
-              Sub (X19, Reg X20, Reg X19);
-            ]
-        | ExplicateControl.BinMinus (lhs, rhs) ->
-            [
-              (match lhs with
-              | MonadicRacket.Int number -> Mov (X20, Num number)
-              | MonadicRacket.Var name -> Load (StringMap.find name names, X20));
-              (match rhs with
-              | MonadicRacket.Int number -> Mov (X21, Num number)
-              | MonadicRacket.Var name -> Load (StringMap.find name names, X21));
-              Sub (X19, Reg X20, Reg X21);
-            ]
-        | ExplicateControl.Plus (lhs, rhs) ->
-            [
-              (match lhs with
-              | MonadicRacket.Int number -> Mov (X20, Num number)
-              | MonadicRacket.Var name -> Load (StringMap.find name names, X20));
-              (match rhs with
-              | MonadicRacket.Int number -> Mov (X21, Num number)
-              | MonadicRacket.Var name -> Load (StringMap.find name names, X21));
-              Add (X19, Reg X20, Reg X21);
-            ]
+  match functions with
+  | Ok (declarations, functions) ->
+      let declarations =
+        declarations
+        |> List.map (fun (decl : declaration) -> decl.name.str)
+        |> List.append builtin_functions
       in
-      match statement with
-      | ExplicateControl.Assign (name, expression) ->
-          let prelude = compile_expr expression names in
-          List.append prelude [ Store (StringMap.find name names, X19) ]
-      | ExplicateControl.Return expression ->
-          let prelude = compile_expr expression names in
-          List.append prelude [ Result X19 ]
-    in
-    List.concat
-      (List.map (fun statement -> compile_statement statement names) statements)
+      let builtin =
+        "\n\
+         .text\n\
+         .global _print_bool\n\
+         _print_bool:\n\
+        \    stp fp, lr, [sp, #-16]!\n\
+        \    sub sp, sp, #16\n\
+        \    cmp w0, #0\n\
+        \    adrp x0, fmt_false@PAGE\n\
+        \    add  x0, x0, fmt_false@PAGEOFF\n\
+        \    b.eq 1f\n\
+        \    adrp x0, fmt_true@PAGE\n\
+        \    add  x0, x0, fmt_true@PAGEOFF\n\
+         1:\n\
+        \    bl _printf\n\
+        \    mov x0, #0\n\
+        \    add sp, sp, #16\n\
+        \    ldp fp, lr, [sp], #16\n\
+        \    ret\n\n\
+         .text\n\
+         .global _print_int\n\
+         _print_int:\n\
+        \    stp fp, lr, [sp, #-16]!\n\
+        \    mov x19, x0\n\
+        \    ADRP X0, fmt_int@PAGE\n\
+        \    ADD X0, X0, fmt_int@PAGEOFF\n\
+        \    STR x19, [SP, #-16]!\n\
+        \    BL  _printf\n\
+        \    mov x0, #0\n\
+        \    ADD SP, SP, #16\n\
+        \    ldp fp, lr, [sp], #16\n\
+        \    ret\n\n\
+         .text\n\
+         .global _read\n\
+         _read:\n\
+        \    stp fp, lr, [sp, #-16]!\n\
+        \    adrp x0, fmt_read@PAGE\n\
+        \    add x0, x0, fmt_read@PAGEOFF\n\
+        \    adrp x11, num@PAGE\n\
+        \    add x11, x11, num@PAGEOFF\n\
+        \    str x11, [SP, #-16]!\n\
+        \    bl _scanf\n\
+        \    add sp, sp, #16\n\
+        \    adrp x11, num@PAGE\n\
+        \    add x11, x11, num@PAGEOFF\n\
+        \    ldr x0, [x11]\n\
+        \    ldp fp, lr, [sp], #16\n\
+        \    ret\n\n\n\
+         .data\n\n\
+         .balign 4\n\
+         fmt_true:\n\
+        \    .asciz \"true\\n\"\n\
+         .balign 4\n\
+         fmt_false:\n\
+        \    .asciz \"false\\n\"\n\
+         .balign 4\n\
+         fmt_read:\n\
+        \    .asciz \"%lld\"\n\
+         .balign 4\n\
+         fmt_int:\n\
+        \    .asciz \"%lld\\n\"\n\
+         .balign 4\n\
+         num:    .quad 0\n\
+        \      "
+      in
+      Ok (compile_functions functions declarations 0 builtin)
+  | Error err -> Error err
 
-  let print_reg register =
-    match register with
-    | X19 -> "x19"
-    | X20 -> "x20"
-    | X21 -> "x21"
-    | X22 -> "x22"
-    | X23 -> "x23"
-    | X24 -> "x24"
-    | X25 -> "x25"
-    | X26 -> "x26"
-    | X27 -> "x27"
-    | X28 -> "x28"
+let compile_to_file file code =
+  let file = open_out file in
+  match compile_code code with
+  | Ok code -> Printf.fprintf file "%s" code
+  | Error error -> Parser.print_error error |> Printf.printf "%s\n"
 
-  let print_atm atomic =
-    match atomic with
-    | Num number -> Printf.sprintf "#%d" number
-    | Reg register -> print_reg register
-
-  let format_statement stmt =
-    match stmt with
-    | Mov (register, atomic) ->
-        Printf.sprintf "    mov %s, %s\n" (print_reg register)
-          (print_atm atomic)
-    | Add (dest, lhs, rhs) ->
-        Printf.sprintf "    add %s, %s, %s\n" (print_reg dest) (print_atm lhs)
-          (print_atm rhs)
-    | Sub (dest, lhs, rhs) ->
-        Printf.sprintf "    sub %s, %s, %s\n" (print_reg dest) (print_atm lhs)
-          (print_atm rhs)
-    | Store (index, src) ->
-        Printf.sprintf "    str %s, [sp, #%d]!\n    sub sp, sp, #%d\n"
-          (print_reg src) (index * 8) (index * 8)
-    | Load (index, dest) ->
-        Printf.sprintf "    ldr %s, [sp, #%d]!\n    sub sp, sp, #%d\n"
-          (print_reg dest) (index * 8) (index * 8)
-    | Read dest ->
-        Printf.sprintf
-          "\n\
-          \    adrp x0, template@PAGE\n\
-          \    add x0, x0, template@PAGEOFF\n\
-          \    adrp x11, num@PAGE\n\
-          \    add x11, x11, num@PAGEOFF\n\
-          \    str x11, [SP, #-16]!\n\
-          \    bl _scanf\n\
-          \    add sp, sp, #16\n\
-          \    adrp x10, num@PAGE\n\
-          \    add x10, x10, num@PAGEOFF\n\
-          \    ldr %s, [x10]\n"
-          (print_reg dest)
-    | Result src ->
-        Printf.sprintf
-          "\n\
-          \    ADRP X0, message@PAGE\n\
-          \    ADD X0, X0, message@PAGEOFF\n\
-          \    STR %s, [SP, #-16]!\n\
-          \    BL  _printf\n\
-          \    ADD SP, SP, #16\n"
-          (print_reg src)
-
-  let compile_format statements names =
-    let logic =
-      String.concat "" (List.map format_statement (compile statements names))
-    in
-    let prelude =
-      ".global _main\n.align 4\n\n_main:\n    stp x29, x30, [SP, #-16]!\n"
-    in
-    let shift = StringMap.cardinal names * 8 in
-    let aligned_shift = if shift mod 16 == 8 then shift + 8 else shift in
-    let memory_allocation =
-      Printf.sprintf "    sub sp, sp, #%d\n" aligned_shift
-    in
-    let memory_deallocation =
-      Printf.sprintf "    add sp, sp, #%d\n" aligned_shift
-    in
-    let epilogue =
-      "\n\
-      \    mov X0, #0\n\
-      \    LDP X29, X30, [SP], #16\n\
-      \    ret\n\n\
-       .data\n\
-       .balign 4\n\
-       message:    .asciz \"Result: %lld\\n\"\n\
-       .balign 4\n\
-       num:    .quad 0\n\
-       .balign 4\n\
-       template:   .asciz \"%lld\"\n"
-    in
-    String.concat "\n"
-      [ prelude; memory_allocation; logic; memory_deallocation; epilogue ]
-end
-*)
+let compile_file_to_file input output =
+  let input = open_in input in
+  let code = In_channel.input_all input in
+  compile_to_file code output
