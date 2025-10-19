@@ -1,0 +1,20 @@
+
+decl fib :: int -> int
+
+impl fib n =
+if n <= 1 then
+1
+else
+fib (n - 1) + fib (n - 2)
+
+decl fib2 :: int -> int -> int -> int
+
+impl fib2 n a b = if n <= 1 then b else fib2 (n - 1) b (a + b)
+
+decl main :: ()
+
+impl main =
+    let x = read in
+    print_int x;
+    print_int (fib x);
+    print_int (fib2 x 1 1)

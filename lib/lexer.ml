@@ -86,6 +86,7 @@ let is_digit c = c >= '0' && c <= '9'
 let is_operator_symbol c =
   c = '-' || c = '+' || c = '!' || c = '%' || c = '^' || c = '&' || c = '*'
   || c = '/' || c = '=' || c = '<' || c = '>' || c = '|' || c = ':' || c = '.'
+  || c = ';'
 
 let is_special_char c =
   c = '(' || c = ')' || c = '[' || c = ']' || c = '{' || c = '}'

@@ -115,7 +115,7 @@ let print_error error =
   | DoubleColonExpected tok ->
       Printf.sprintf "`::` token expected, got: `%s`" (print_token tok)
   | StatementExpected tok ->
-      Printf.sprintf "`impl` of `decl` expected, got: `%s`" (print_token tok)
+      Printf.sprintf "`impl` or `decl` expected, got: `%s`" (print_token tok)
   | CannotUseConditionInFunction pos ->
       Printf.sprintf
         "Cannot use condition expression inside as an argument without \
@@ -401,6 +401,14 @@ let rec parse_expr tokens in_function =
 
   let rec parse_function (name : substring) (arguments : expr list)
       (position : position) : expr parser =
+    let parse_nonrequired_expr : expr option parser =
+     fun tokens ->
+      let res, rest = parse_expr tokens true in
+      match res with
+      | Ok expr -> return (Some expr) rest
+      | Error NoPossibleExpression -> return None tokens
+      | Error err -> fail err rest
+    in
     let* argument = parse_nonrequired_expr in
     match argument with
     | Some new_arg ->
@@ -408,7 +416,8 @@ let rec parse_expr tokens in_function =
     | None ->
         return
           (TmApplication
-             (extend_span name.position position, { name; arguments }))
+             ( extend_span name.position position,
+               { name; arguments = List.rev arguments } ))
   in
 
   let lhs, rest =
@@ -442,14 +451,6 @@ and parse_required_expr ~position : expr parser =
   match res with
   | Ok expr -> return expr rest
   | Error NoPossibleExpression -> fail (UnexpectedEnd (snd position)) rest
-  | Error err -> fail err rest
-
-and parse_nonrequired_expr : expr option parser =
- fun tokens ->
-  let res, rest = parse_expr tokens false in
-  match res with
-  | Ok expr -> return (Some expr) rest
-  | Error NoPossibleExpression -> return None tokens
   | Error err -> fail err rest
 
 let operator_level operator =

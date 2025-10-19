@@ -485,9 +485,9 @@ module AsmGenerator = struct
   let buffer_reg = "x16"
   let second_buffer_reg = "x20"
   let additional_buffer_reg = "x21"
-  let stack_position sp_shift index = (index * 8) - sp_shift
+  let stack_position sp_shift index = sp_shift - (index * 8)
 
-  let compile_instruction out function_name instruction =
+  let compile_instruction out function_name sp_shift instruction =
     match instruction with
     | MovIns (dest, data) -> (
         match dest with
@@ -499,7 +499,7 @@ module AsmGenerator = struct
                 Format.sprintf "    mov %s, %s" dest src |> add_line out
             | BasicReg (Stack index) ->
                 Format.sprintf "    ldr %s, [sp, #%d]" dest
-                  (stack_position 0 index)
+                  (stack_position sp_shift index)
                 |> add_line out)
         | Stack dest ->
             let src =
@@ -510,11 +510,12 @@ module AsmGenerator = struct
               | BasicReg (Reg src) -> src
               | BasicReg (Stack src) ->
                   Format.sprintf "    ldr %s, [sp, #%d]" buffer_reg
-                    (stack_position 0 src)
+                    (stack_position sp_shift src)
                   |> add_line out;
                   buffer_reg
             in
-            Format.sprintf "    str %s, [sp, #%d]" src (stack_position 0 dest)
+            Format.sprintf "    str %s, [sp, #%d]" src
+              (stack_position sp_shift dest)
             |> add_line out)
     | OpIns (dest, op, lhs, rhs) -> (
         let lhs =
@@ -525,7 +526,7 @@ module AsmGenerator = struct
           | BasicReg (Reg src) -> src
           | BasicReg (Stack src) ->
               Format.sprintf "    ldr %s, [sp, #%d]" buffer_reg
-                (stack_position 0 src)
+                (stack_position sp_shift src)
               |> add_line out;
               buffer_reg
         in
@@ -538,7 +539,7 @@ module AsmGenerator = struct
           | BasicReg (Reg src) -> src
           | BasicReg (Stack src) ->
               Format.sprintf "    ldr %s, [sp, #%d]" additional_buffer_reg
-                (stack_position 0 src)
+                (stack_position sp_shift src)
               |> add_line out;
               additional_buffer_reg
         in
@@ -574,19 +575,18 @@ module AsmGenerator = struct
         | Stack index ->
             compile_operator second_buffer_reg op;
             add_line out
-              (Format.sprintf "    ldr %s, [sp, #%d]" second_buffer_reg
-                 (stack_position 0 index)))
+              (Format.sprintf "    str %s, [sp, #%d]" second_buffer_reg
+                 (stack_position sp_shift index)))
     | CMovIns (cond, label) ->
         let cond =
           match cond with
           | BasicInt int ->
-              Format.sprintf "    mov %s, %d" additional_buffer_reg int
-              |> add_line out;
+              Format.sprintf "    mov %s, %d" buffer_reg int |> add_line out;
               buffer_reg
           | BasicReg (Reg src) -> src
           | BasicReg (Stack src) ->
-              Format.sprintf "    ldr %s, [sp, #%d]" additional_buffer_reg
-                (stack_position 0 src)
+              Format.sprintf "    ldr %s, [sp, #%d]" buffer_reg
+                (stack_position sp_shift src)
               |> add_line out;
               buffer_reg
         in
@@ -601,7 +601,7 @@ module AsmGenerator = struct
               Format.sprintf "    mov %s, %s" dest src |> add_line out
           | BasicReg (Stack src) ->
               Format.sprintf "    ldr %s, [sp, #%d]" dest
-                (stack_position shift src)
+                (stack_position (sp_shift + shift) src)
               |> add_line out
           | BasicInt int ->
               Format.sprintf "    mov %s, %d" dest int |> add_line out
@@ -631,7 +631,7 @@ module AsmGenerator = struct
                   (Format.sprintf "    ldr %s, [sp, #%d]" buffer_reg (index * 8));
                 add_line out
                   (Format.sprintf "    str %s, [sp, #%d]" buffer_reg
-                     (stack_position shift (-1 - index))))
+                     (stack_position (sp_shift + shift) (-1 - index))))
               rest_args
             |> List.fold_left (fun _ _ -> ()) ();
             add_line out (Format.sprintf "    add sp, sp, #%d" shift))
@@ -657,7 +657,8 @@ module AsmGenerator = struct
           match dest with
           | Stack index ->
               add_line out
-                (Format.sprintf "    str x0, [sp, #%d]" (stack_position 0 index))
+                (Format.sprintf "    str x0, [sp, #%d]"
+                   (stack_position sp_shift index))
           | Reg reg -> add_line out (Format.sprintf "    mov %s, x0" reg))
 
   let compile_function name params instructions (homes : reg StringMap.t) =
@@ -680,14 +681,15 @@ module AsmGenerator = struct
     |> List.fold_left
          (fun index _ ->
            add_line out
-             (Format.sprintf "    str x%d, [sp, #%d]" index ((index + 1) * 8));
+             (Format.sprintf "    str x%d, [sp, #%d]" index
+                (stack_position frame_size (index + 1)));
            index + 1)
          0
     |> fun _ ->
     ();
 
     List.map
-      (fun instruction -> compile_instruction out name instruction)
+      (fun instruction -> compile_instruction out name frame_size instruction)
       instructions
     |> List.fold_left (fun _ _ -> ()) ();
 
@@ -715,15 +717,23 @@ let rec compile_functions (functions : implementation list)
         |> List.map (fun name -> (name, name))
         |> StringMap.of_list
       in
+      print_endline "uniquify";
       let expr, count = expression |> Uniquify.uniquify_expr count params_map in
       let params_map =
         params |> List.map (fun param -> (param, true)) |> StringMap.of_list
       in
+      print_endline "monadize";
       let expr, count = Monadic.remove_complex_operands params_map count expr in
+      print_endline "explicate control";
       let stmts, _ = ExplicateControl.explicate_control expr None count in
+      stmts
+      |> List.map (fun stmt ->
+             print_endline (ExplicateControl.format_statement stmt))
+      |> List.fold_left (fun _ _ -> ()) ();
       let params_map =
         params |> List.map (fun param -> (param, 0)) |> StringMap.of_list
       in
+      print_endline "analyze variable use";
       let variables = AssignHomes.analyze_variable_use stmts params_map in
       let stack_list =
         List.take 8 params
@@ -740,6 +750,7 @@ let rec compile_functions (functions : implementation list)
       let homes =
         StringMap.map (fun index -> AssignHomes.Stack index) stack_list
       in
+      print_endline "assign homes";
       let homes =
         AssignHomes.assign_homes stmts
           {
@@ -851,12 +862,15 @@ let compile_code code =
   | Error err -> Error err
 
 let compile_to_file file code =
-  let file = open_out file in
   match compile_code code with
-  | Ok code -> Printf.fprintf file "%s" code
+  | Ok code ->
+      let file = open_out file in
+      Printf.fprintf file "%s" code;
+      close_out file
   | Error error -> Parser.print_error error |> Printf.printf "%s\n"
 
 let compile_file_to_file input output =
   let input = open_in input in
   let code = In_channel.input_all input in
-  compile_to_file code output
+  compile_to_file output code;
+  close_in input
