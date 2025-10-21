@@ -1,85 +1,47 @@
-type char_position = { line : int; char : int }
-type position = char_position * char_position
+open Utils
 
-let print_position (left, right) =
-  Printf.sprintf "%d:%d - %d:%d" left.line left.char right.line (right.char - 1)
+type token_type =
+  | TkIdent of string
+  | TkOperator of string
+  | TkNumber of int
+  | TkParenOpen
+  | TkParenClose
+  | TkBracketOpen
+  | TkBracketClose
+  | TkBraceOpen
+  | TkBraceClose
+  | TkBegin
+  | TkLet
+  | TkIn
+  | TkFunc
+  | TkIf
+  | TkThen
+  | TkElse
+  | TkTrue
+  | TkFalse
 
-type lex_token =
-  | TkIdent of position * string
-  | TkOperator of position * string
-  | TkNumber of position * int
-  | TkParenOpen of position
-  | TkParenClose of position
-  | TkBracketOpen of position
-  | TkBracketClose of position
-  | TkBraceOpen of position
-  | TkBraceClose of position
-  | TkLet of position
-  | TkIn of position
-  | TkDecl of position
-  | TkImpl of position
-  | TkIf of position
-  | TkThen of position
-  | TkElse of position
-  | TkAnd of position
-  | TkOr of position
-  | TkArrow of position
-  | TkDoubleColon of position
-  | TkSet of position
-  | TkTrue of position
-  | TkFalse of position
+type token = { type_ : token_type; position : position }
 
 let print_token token =
-  match token with
-  | TkIdent (_, ident) -> ident
-  | TkOperator (_, ident) -> ident
-  | TkNumber (_, num) -> string_of_int num
-  | TkParenOpen _ -> "("
-  | TkParenClose _ -> ")"
-  | TkBracketOpen _ -> "["
-  | TkBracketClose _ -> "]"
-  | TkBraceOpen _ -> "{"
-  | TkBraceClose _ -> "}"
-  | TkLet _ -> "let"
-  | TkIn _ -> "in"
-  | TkDecl _ -> "decl"
-  | TkImpl _ -> "impl"
-  | TkIf _ -> "if"
-  | TkThen _ -> "then"
-  | TkElse _ -> "else"
-  | TkAnd _ -> "and"
-  | TkOr _ -> "or"
-  | TkArrow _ -> "->"
-  | TkDoubleColon _ -> "::"
-  | TkSet _ -> "="
-  | TkTrue _ -> "true"
-  | TkFalse _ -> "false"
-
-let token_position token =
-  match token with
-  | TkIdent (pos, _) -> pos
-  | TkOperator (pos, _) -> pos
-  | TkNumber (pos, _) -> pos
-  | TkParenOpen pos -> pos
-  | TkParenClose pos -> pos
-  | TkBracketOpen pos -> pos
-  | TkBracketClose pos -> pos
-  | TkBraceOpen pos -> pos
-  | TkBraceClose pos -> pos
-  | TkLet pos -> pos
-  | TkIn pos -> pos
-  | TkDecl pos -> pos
-  | TkImpl pos -> pos
-  | TkIf pos -> pos
-  | TkThen pos -> pos
-  | TkElse pos -> pos
-  | TkAnd pos -> pos
-  | TkOr pos -> pos
-  | TkArrow pos -> pos
-  | TkDoubleColon pos -> pos
-  | TkSet pos -> pos
-  | TkTrue pos -> pos
-  | TkFalse pos -> pos
+  match token.type_ with
+  | TkIdent ident -> ident
+  | TkOperator ident -> ident
+  | TkNumber num -> string_of_int num
+  | TkParenOpen -> "("
+  | TkParenClose -> ")"
+  | TkBracketOpen -> "["
+  | TkBracketClose -> "]"
+  | TkBraceOpen -> "{"
+  | TkBraceClose -> "}"
+  | TkBegin -> "begin"
+  | TkLet -> "let"
+  | TkIn -> "in"
+  | TkIf -> "if"
+  | TkThen -> "then"
+  | TkElse -> "else"
+  | TkTrue -> "true"
+  | TkFalse -> "false"
+  | TkFunc -> "func"
 
 let is_digit c = c >= '0' && c <= '9'
 
@@ -98,12 +60,14 @@ let list_to_reversed_string x =
   let len = List.length x in
   String.init len (fun n -> List.nth x (len - n - 1))
 
-let rec lex_ident pos acc input =
+let rec lex_ident use_operator_symbols pos acc input =
   match input with
-  | c :: rest when is_special_char c || is_operator_symbol c || is_whitespace c
-    ->
+  | c :: rest
+    when is_special_char c
+         || (is_operator_symbol c && not use_operator_symbols)
+         || is_whitespace c ->
       (list_to_reversed_string acc, pos, c :: rest)
-  | c :: rest -> lex_ident (pos + 1) (c :: acc) rest
+  | c :: rest -> lex_ident use_operator_symbols (pos + 1) (c :: acc) rest
   | [] -> (list_to_reversed_string acc, pos, [])
 
 let rec lex_operator pos acc input =
@@ -132,7 +96,7 @@ let rec lex_string line pos acc input =
   | '"' :: rest -> (list_to_reversed_string acc, line, pos + 1, rest)
   | c :: rest -> lex_string line (pos + 1) (c :: acc) rest
 
-let lexer (input : string) : lex_token list =
+let lexer source_language (input : string) : token list =
   let rec aux line pos input =
     match input with
     | [] -> []
@@ -140,45 +104,57 @@ let lexer (input : string) : lex_token list =
     | c :: rest when is_whitespace c -> aux line (pos + 1) rest
     | c :: rest when is_special_char c ->
         let position = ({ line; char = pos }, { line; char = pos + 1 }) in
-        (match c with
-        | '(' -> TkParenOpen position
-        | ')' -> TkParenClose position
-        | '[' -> TkBracketOpen position
-        | ']' -> TkBracketClose position
-        | '{' -> TkBraceOpen position
-        | '}' -> TkBraceClose position
-        | _ -> failwith "unreachable")
+        {
+          type_ =
+            (match c with
+            | '(' -> TkParenOpen
+            | ')' -> TkParenClose
+            | '[' -> TkBracketOpen
+            | ']' -> TkBracketClose
+            | '{' -> TkBraceOpen
+            | '}' -> TkBraceClose
+            | _ -> failwith "unreachable");
+          position;
+        }
         :: aux line (pos + 1) rest
     | c :: rest when is_digit c ->
         let number, new_pos, cs = lex_number pos [ c ] rest in
-        TkNumber (({ line; char = pos }, { line; char = new_pos }), number)
-        :: aux line new_pos cs
-    | c :: rest when is_operator_symbol c ->
+        let position = ({ line; char = pos }, { line; char = new_pos }) in
+        { type_ = TkNumber number; position } :: aux line new_pos cs
+    | c :: rest when is_operator_symbol c && source_language = Config.Lama ->
         let operator, new_pos, cs = lex_operator pos [ c ] rest in
         let position = ({ line; char = pos }, { line; char = new_pos }) in
-        (match operator with
-        | "->" -> TkArrow position
-        | "=" -> TkSet position
-        | "::" -> TkDoubleColon position
-        | other -> TkOperator (position, other))
-        :: aux line new_pos cs
+        { type_ = TkOperator operator; position } :: aux line new_pos cs
     | c :: rest ->
-        let ident, new_pos, cs = lex_ident pos [ c ] rest in
+        let ident, new_pos, cs =
+          lex_ident (source_language = Config.Racket) pos [ c ] rest
+        in
         let position = ({ line; char = pos }, { line; char = new_pos }) in
-        (match ident with
-        | "let" -> TkLet position
-        | "in" -> TkIn position
-        | "decl" -> TkDecl position
-        | "impl" -> TkImpl position
-        | "if" -> TkIf position
-        | "then" -> TkThen position
-        | "else" -> TkElse position
-        | "and" -> TkAnd position
-        | "or" -> TkOr position
-        | "xor" -> TkOr position
-        | "true" -> TkTrue position
-        | "false" -> TkFalse position
-        | id -> TkIdent (position, id))
-        :: aux line new_pos cs
+        let type_ =
+          match ident with
+          | "let" -> TkLet
+          | "if" -> TkIf
+          | "func" -> TkFunc
+          | ident -> (
+              match source_language with
+              | Config.Lama -> (
+                  match ident with
+                  | "and" -> TkOperator "and"
+                  | "or" -> TkOperator "or"
+                  | "xor" -> TkOperator "xor"
+                  | "in" -> TkIn
+                  | "then" -> TkThen
+                  | "else" -> TkElse
+                  | "true" -> TkTrue
+                  | "false" -> TkFalse
+                  | ident -> TkIdent ident)
+              | Config.Racket -> (
+                  match ident with
+                  | "begin" -> TkBegin
+                  | "#t" -> TkTrue
+                  | "#f" -> TkFalse
+                  | ident -> TkIdent ident))
+        in
+        { type_; position } :: aux line new_pos cs
   in
   aux 0 0 (List.init (String.length input) (String.get input))

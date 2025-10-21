@@ -1,10 +1,6 @@
-decl square :: int -> int
+func square (x : int) : int = x * x
 
-impl square x = x * x
-
-decl main :: ()
-
-impl main =
+func main : () =
 	let x = read in
 	let y = read in
 	print_int (x + y)
