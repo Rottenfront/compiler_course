@@ -49,3 +49,30 @@ let rec cst_to_ast (functions : Cst.implementation list)
       let parameters = List.map (fun (name, _) -> name.str) func.parameters in
       let expression = cst_expr_to_ast func.expression in
       cst_to_ast rest ({ name; parameters; expression } :: result)
+
+let rec print_ast_expr (expr : expr) : string =
+  match expr with
+  | TmLiteral lit -> Cst.print_literal lit
+  | TmApplication { name; arguments } ->
+      if List.is_empty arguments then name
+      else
+        "(" ^ name ^ " "
+        ^ (List.map print_ast_expr arguments |> String.concat " ")
+        ^ ")"
+  | TmIf { condition; if_true; if_false } ->
+      "(if " ^ print_ast_expr condition ^ " " ^ print_ast_expr if_true ^ " "
+      ^ print_ast_expr if_false ^ ")"
+  | TmLet { name; value; expression } ->
+      "(let ([" ^ name ^ " " ^ print_ast_expr value ^ "]) "
+      ^ print_ast_expr expression ^ ")"
+  | TmOpApp { operator; lhs; rhs } ->
+      "("
+      ^ Cst.print_operator operator
+      ^ " " ^ print_ast_expr lhs ^ " " ^ print_ast_expr rhs ^ ")"
+
+let print_ast (func : implementation) : string =
+  "(func " ^ func.name ^ " ("
+  ^ String.concat " " func.parameters
+  ^ ") "
+  ^ print_ast_expr func.expression
+  ^ ")"

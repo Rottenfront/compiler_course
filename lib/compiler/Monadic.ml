@@ -134,3 +134,28 @@ let rec remove_complex_operands variables count expr =
           let lhs, count = remove_complex_operands variables count if_true in
           let rhs, count = remove_complex_operands variables count if_false in
           (AtmIf (cond, lhs, rhs), count))
+
+let print_atm atm =
+  match atm with
+  | AtmVar name -> name
+  | AtmInt int -> string_of_int int
+  | AtmBool bool -> string_of_bool bool
+
+let rec print_monadic expr =
+  match expr with
+  | AtmValue atm -> print_atm atm
+  | AtmFunction (name, parameters) ->
+      "(" ^ name
+      ^ (List.map (fun param -> " " ^ print_atm param) parameters
+        |> String.concat "")
+      ^ ")"
+  | AtmOp (op, lhs, rhs) ->
+      "(" ^ print_math_op op ^ " " ^ print_atm lhs ^ " " ^ print_atm rhs ^ ")"
+  | AtmIf (cond, lhs, rhs) ->
+      "(if " ^ print_atm cond ^ " " ^ print_monadic lhs ^ " "
+      ^ print_monadic rhs ^ ")"
+  | Let (name, value, expression) ->
+      "(let [" ^ name ^ " " ^ print_monadic value ^ "] "
+      ^ print_monadic expression ^ ")"
+  | Sequence (lhs, rhs) ->
+      "(begin " ^ print_monadic lhs ^ " " ^ print_monadic rhs ^ ")"

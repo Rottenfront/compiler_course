@@ -177,7 +177,7 @@ let compile_instruction out function_name sp_shift instruction =
           |> List.fold_left (fun _ _ -> ()) ();
           add_line out (Format.sprintf "    bl %s" name);
           add_line out (Format.sprintf "    add sp, sp, #%d" shift))
-        else add_line out (Format.sprintf "    bl _%s" name);
+        else add_line out (Format.sprintf "    bl %s" name);
         match dest with
         | Stack index ->
             add_line out
@@ -196,7 +196,7 @@ let compile_function name params instructions (homes : reg StringMap.t) =
   let out = ref "" in
   add_line out ".text";
   add_line out (".global " ^ name);
-  add_line out ("" ^ name ^ ":");
+  add_line out (name ^ ":");
   add_line out "    stp fp, lr, [sp, #-16]!";
   add_line out ("start_" ^ name ^ ":");
   add_line out (Format.sprintf "    sub sp, sp, #%d" frame_size);
@@ -313,7 +313,7 @@ let compile_code functions =
     \    adr x0, fmt_read\n\
     \    adr x11, num\n\
     \    str x11, [SP, #-16]!\n\
-    \    bl _scanf\n\
+    \    bl scanf\n\
     \    add sp, sp, #16\n\
     \    adr x11, num\n\
     \    ldr x0, [x11]\n\
@@ -336,4 +336,4 @@ let compile_code functions =
      num:    .quad 0\n\
     \      "
   in
-  Ok (compile_functions functions declarations builtin)
+  compile_functions functions declarations builtin

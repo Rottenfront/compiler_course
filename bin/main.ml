@@ -36,4 +36,32 @@ let () =
     | "racket" -> Config.Racket
     | _ -> failwith "Unknown source language"
   in
-  Compiler.compile_file_to_file target source !input_file !output_file
+  let input = open_in !input_file in
+  let code =
+    let code = In_channel.input_all input in
+    close_in input;
+    code
+  in
+  let tokens = Lexer.lexer source code in
+  let functions =
+    match Parser.Lama.parse_stmts Parser.Cst.default_position [] tokens with
+    | Ok functions, _ -> functions
+    | Error err, _ ->
+        failwith
+          (Format.sprintf "Parser failed on %s" (Parser.Cst.print_error err))
+  in
+  let check_result = Checker.check_program functions in
+  if check_result |> List.is_empty then ()
+  else
+    failwith
+      (Format.sprintf "Checker failed:\n%s"
+         (check_result
+         |> List.map (fun error -> "- " ^ Checker.print_error error)
+         |> String.concat "\n"));
+
+  let ast = Parser.Ast.cst_to_ast functions [] in
+  let assembly_code = Compiler.M.compile !verbose target ast in
+
+  let file = open_out !output_file in
+  Printf.fprintf file "%s" assembly_code;
+  close_out file
