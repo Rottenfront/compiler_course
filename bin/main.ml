@@ -36,8 +36,8 @@ let () =
     | "racket" -> Config.Racket
     | _ -> failwith "Unknown source language"
   in
-  let input = open_in !input_file in
   let code =
+    let input = open_in !input_file in
     let code = In_channel.input_all input in
     close_in input;
     code

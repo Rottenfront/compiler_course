@@ -138,7 +138,7 @@ let compile_instruction out function_name sp_shift instruction =
       List.take 8 args
       |> List.mapi (fun index arg -> load_arg 0 ("x" ^ string_of_int index) arg)
       |> List.fold_left (fun _ _ -> ()) ();
-      if dest == Reg "x0" && name == function_name then (
+      if dest = Reg "x0" && name = function_name then
         if List.length args > 8 then (
           let rest_args =
             args |> List.rev |> List.take (List.length args - 8) |> List.rev
@@ -161,9 +161,9 @@ let compile_instruction out function_name sp_shift instruction =
                    (stack_position (sp_shift + shift) (-1 - index))))
             rest_args
           |> List.fold_left (fun _ _ -> ()) ();
+          add_line out (Format.sprintf "    b start_%s" function_name);
           add_line out (Format.sprintf "    add sp, sp, #%d" shift))
-        else ();
-        add_line out (Format.sprintf "    b start_%s" function_name))
+        else add_line out (Format.sprintf "    b start_%s" function_name)
       else (
         if List.length args > 8 then (
           let rest_args =
