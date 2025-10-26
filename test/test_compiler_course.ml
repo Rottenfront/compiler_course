@@ -10,13 +10,13 @@ let read_file path =
   close_in ic;
   s
 
-let test_parse_file filename () =
+let test_parse_file language filename () =
   let path = Filename.concat sample_dir filename in
   let content = read_file path in
   let functions =
     match
-      content |> Lexer.lexer Config.Lama
-      |> Parser.Lama.parse_stmts Parser.Cst.default_position []
+      content |> Lexer.lexer language
+      |> Parser.Language.parse language Parser.Cst.default_position []
     with
     | Ok functions, _ -> functions
     | Error err, _ ->
@@ -30,12 +30,18 @@ let test_parse_file filename () =
       |> List.map (fun error -> "- " ^ Checker.print_error error)
       |> String.concat "\n")
 
-let () =
+let make_tests language suffix =
   let files =
     Sys.readdir sample_dir |> Array.to_list
-    |> List.filter (fun f -> Filename.check_suffix f ".cmp")
+    |> List.filter (fun f -> Filename.check_suffix f suffix)
   in
-  let tests =
-    List.map (fun file -> test_case file `Quick (test_parse_file file)) files
-  in
-  run "Parser tests" [ ("samples", tests) ]
+  List.map
+    (fun file -> test_case file `Quick (test_parse_file language file))
+    files
+
+let () =
+  run "Parser tests"
+    [
+      ("lama samples", make_tests Config.Lama ".cmp");
+      ("racket samples", make_tests Config.Racket ".rkt");
+    ]

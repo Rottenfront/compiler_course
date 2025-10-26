@@ -89,14 +89,8 @@ and expr_node = { value : expr; position : position }
 
 type parse_error =
   | ConditionExpressionExpected of position
-  | ThenTokenExpected of token
-  | ElseTokenExpected of token
-  | InTokenExpected of token
-  | SetTokenExpected of token
-  | ArrowTokenExpected of token
+  | TokenExpected of token_type * token
   | IdentTokenExpected of token
-  | ParenCloseExpected of token
-  | ColonExpected of token
   | CannotUseConditionInFunction of position
   | CannotDefineVariableInFunction of position
   | UnknownOperator of substring
@@ -107,39 +101,18 @@ type parse_error =
   | NoPossibleExpression of position
   | NoFunction of position
   | NoPossibleType of position
-  | FuncTokenExpected of token
 
 let print_error error =
   match error with
   | ConditionExpressionExpected pos ->
       Format.sprintf "Condition expression expected on %s" (print_position pos)
-  | ThenTokenExpected tok ->
-      Format.sprintf "`then` token expected, got: `%s` on %s" (print_token tok)
-        (print_position tok.position)
-  | ElseTokenExpected tok ->
-      Format.sprintf "`else` token expected, got: `%s` on %s" (print_token tok)
-        (print_position tok.position)
-  | InTokenExpected tok ->
-      Format.sprintf "`in` token expected, got: `%s` on %s" (print_token tok)
-        (print_position tok.position)
-  | SetTokenExpected tok ->
-      Format.sprintf "`=` token expected, got: `%s` on %s" (print_token tok)
-        (print_position tok.position)
-  | ArrowTokenExpected tok ->
-      Format.sprintf "`->` token expected, got: `%s` on %s" (print_token tok)
-        (print_position tok.position)
+  | TokenExpected (expected, got) ->
+      Format.sprintf "`%s` token expected, got: `%s` on %s"
+        (print_token expected) (print_token got.type_)
+        (print_position got.position)
   | IdentTokenExpected tok ->
       Format.sprintf "identifier token expected, got: `%s` on %s"
-        (print_token tok)
-        (print_position tok.position)
-  | ParenCloseExpected tok ->
-      Format.sprintf "`)` token expected, got: `%s` on %s" (print_token tok)
-        (print_position tok.position)
-  | ColonExpected tok ->
-      Format.sprintf "`:` token expected, got: `%s` on %s" (print_token tok)
-        (print_position tok.position)
-  | FuncTokenExpected tok ->
-      Format.sprintf "`func` token expected, got: `%s` on %s" (print_token tok)
+        (print_token tok.type_)
         (print_position tok.position)
   | CannotUseConditionInFunction pos ->
       Format.sprintf
@@ -160,7 +133,8 @@ let print_error error =
       Format.sprintf "Unknown type `%s` used on %s" str
         (print_position position)
   | FunctionNameExpected tok ->
-      Format.sprintf "`then` token expected, got: `%s` on %s" (print_token tok)
+      Format.sprintf "`then` token expected, got: `%s` on %s"
+        (print_token tok.type_)
         (print_position tok.position)
   | UnexpectedEnd pos ->
       Format.sprintf "Unexpected end on %s" (print_position pos)
@@ -211,13 +185,13 @@ let error_unexpected_end pos : 'a parser =
  fun rest -> (Error (UnexpectedEnd pos), rest)
 
 let error_in_expected tok : 'a parser =
- fun rest -> (Error (InTokenExpected tok), rest)
+ fun rest -> (Error (TokenExpected (TkIn, tok)), rest)
 
 let error_set_expected tok : 'a parser =
- fun rest -> (Error (SetTokenExpected tok), rest)
+ fun rest -> (Error (TokenExpected (TkOperator "=", tok)), rest)
 
 let error_arrow_expected tok : 'a parser =
- fun rest -> (Error (ArrowTokenExpected tok), rest)
+ fun rest -> (Error (TokenExpected (TkOperator "->", tok)), rest)
 
 let error_ident_expected tok : 'a parser =
  fun rest -> (Error (IdentTokenExpected tok), rest)
@@ -226,22 +200,28 @@ let error_condition_expected pos : 'a parser =
  fun rest -> (Error (ConditionExpressionExpected pos), rest)
 
 let error_else_expected tok : 'a parser =
- fun rest -> (Error (ElseTokenExpected tok), rest)
+ fun rest -> (Error (TokenExpected (TkElse, tok)), rest)
 
-let error_func_expected tok : 'a parser =
- fun rest -> (Error (FuncTokenExpected tok), rest)
+let error_define_expected tok : 'a parser =
+ fun rest -> (Error (TokenExpected (TkDefine, tok)), rest)
 
 let error_then_expected tok : 'a parser =
- fun rest -> (Error (ThenTokenExpected tok), rest)
+ fun rest -> (Error (TokenExpected (TkThen, tok)), rest)
 
 let error_function_name_expected tok : 'a parser =
  fun rest -> (Error (FunctionNameExpected tok), rest)
 
 let error_paren_close_expected tok : 'a parser =
- fun rest -> (Error (ParenCloseExpected tok), rest)
+ fun rest -> (Error (TokenExpected (TkParenClose, tok)), rest)
+
+let error_bracket_close_expected tok : 'a parser =
+ fun rest -> (Error (TokenExpected (TkBracketClose, tok)), rest)
+
+let error_brace_close_expected tok : 'a parser =
+ fun rest -> (Error (TokenExpected (TkBraceClose, tok)), rest)
 
 let error_colon_expected tok : 'a parser =
- fun rest -> (Error (ColonExpected tok), rest)
+ fun rest -> (Error (TokenExpected (TkOperator ":", tok)), rest)
 
 let error_cannot_use_condition pos : 'a parser =
  fun rest -> (Error (CannotUseConditionInFunction pos), rest)

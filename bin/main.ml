@@ -44,7 +44,9 @@ let () =
   in
   let tokens = Lexer.lexer source code in
   let functions =
-    match Parser.Lama.parse_stmts Parser.Cst.default_position [] tokens with
+    match
+      Parser.Language.parse source Parser.Cst.default_position [] tokens
+    with
     | Ok functions, _ -> functions
     | Error err, _ ->
         failwith

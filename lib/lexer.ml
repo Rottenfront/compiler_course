@@ -13,7 +13,7 @@ type token_type =
   | TkBegin
   | TkLet
   | TkIn
-  | TkFunc
+  | TkDefine
   | TkIf
   | TkThen
   | TkElse
@@ -23,7 +23,7 @@ type token_type =
 type token = { type_ : token_type; position : position }
 
 let print_token token =
-  match token.type_ with
+  match token with
   | TkIdent ident -> ident
   | TkOperator ident -> ident
   | TkNumber num -> string_of_int num
@@ -41,7 +41,7 @@ let print_token token =
   | TkElse -> "else"
   | TkTrue -> "true"
   | TkFalse -> "false"
-  | TkFunc -> "func"
+  | TkDefine -> "define"
 
 let is_digit c = c >= '0' && c <= '9'
 
@@ -134,7 +134,7 @@ let lexer source_language (input : string) : token list =
           match ident with
           | "let" -> TkLet
           | "if" -> TkIf
-          | "func" -> TkFunc
+          | "define" -> TkDefine
           | ident -> (
               match source_language with
               | Config.Lama -> (

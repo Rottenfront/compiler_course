@@ -1,6 +1,6 @@
-func square (x : int) : int = x * x
+define square (x : int) : int = x * x
 
-func main : () =
+define main : () =
 	let x = read in
 	let y = read in
 	print_int (x + y)

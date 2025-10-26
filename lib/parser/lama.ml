@@ -435,17 +435,17 @@ let parse_func (position : position) : implementation parser =
         parse_parameters position ((name, type_) :: parameters)
   in
 
-  let is_func = function TkFunc -> true | _ -> false in
+  let is_define = function TkDefine -> true | _ -> false in
   let is_set = function TkOperator "=" -> true | _ -> false in
   let is_colon = function TkOperator ":" -> true | _ -> false in
-  let* func_tok =
-    expect_token ~pred:is_func
+  let* define_tok =
+    expect_token ~pred:is_define
       ~on_empty:(error_no_function position)
-      ~on_unexpected:error_func_expected
+      ~on_unexpected:error_define_expected
   in
   let* name =
     expect_ident
-      ~on_empty:(error_unexpected_end func_tok.position)
+      ~on_empty:(error_unexpected_end define_tok.position)
       ~on_unexpected:error_function_name_expected
   in
   let* parameters = parse_parameters name.position [] in
@@ -465,7 +465,8 @@ let parse_func (position : position) : implementation parser =
       ~on_unexpected:error_set_expected
   in
   let* expression = parse_expr false set_tok.position in
-  let position = extend_span func_tok.position expression.position in
+  let expression = distribute_operator expression in
+  let position = extend_span define_tok.position expression.position in
   return { position; name; parameters; type_; expression }
 
 let rec parse_stmts position funcs =
