@@ -201,8 +201,8 @@ let compile_function name params instructions (homes : reg StringMap.t) =
   add_line out (".global _" ^ name);
   add_line out ("_" ^ name ^ ":");
   add_line out "    stp fp, lr, [sp, #-16]!";
-  add_line out ("start_" ^ name ^ ":");
   add_line out (Format.sprintf "    sub sp, sp, #%d" frame_size);
+  add_line out ("start_" ^ name ^ ":");
 
   List.take 8 params
   |> List.fold_left
