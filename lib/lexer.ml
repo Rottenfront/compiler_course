@@ -14,6 +14,8 @@ type token_type =
   | TkLet
   | TkIn
   | TkDefine
+  | TkDefOp
+  | TkType
   | TkIf
   | TkThen
   | TkElse
@@ -42,6 +44,8 @@ let print_token token =
   | TkTrue -> "true"
   | TkFalse -> "false"
   | TkDefine -> "define"
+  | TkDefOp -> "defop"
+  | TkType -> "type"
 
 let is_digit c = c >= '0' && c <= '9'
 
@@ -135,6 +139,7 @@ let lexer source_language (input : string) : token list =
           | "let" -> TkLet
           | "if" -> TkIf
           | "define" -> TkDefine
+          | "type" -> TkType
           | ident -> (
               match source_language with
               | Config.Lama -> (
@@ -147,6 +152,7 @@ let lexer source_language (input : string) : token list =
                   | "else" -> TkElse
                   | "true" -> TkTrue
                   | "false" -> TkFalse
+                  | "defop" -> TkDefOp
                   | ident -> TkIdent ident)
               | Config.Racket -> (
                   match ident with

@@ -9,7 +9,7 @@ let print_literal literal =
   | LitBool true -> "true"
   | LitBool false -> "false"
 
-type operator_type =
+type builtin_operator_type =
   | OpAdd
   | OpSub
   | OpMul
@@ -23,11 +23,11 @@ type operator_type =
   | OpAnd
   | OpOr
   | OpXor
-  | OpSemicolon
 
+type operator_type = BuiltInOp of builtin_operator_type | UserOp of string
 type operator = { type_ : operator_type; position : position }
 
-let print_operator operator =
+let print_builtin_operator operator =
   match operator with
   | OpAdd -> "+"
   | OpSub -> "-"
@@ -42,21 +42,27 @@ let print_operator operator =
   | OpAnd -> "&&"
   | OpOr -> "||"
   | OpXor -> "^"
-  | OpSemicolon -> ";"
+
+let print_operator operator =
+  match operator with
+  | BuiltInOp op -> print_builtin_operator op
+  | UserOp op -> op
 
 type type_value =
-  | TyInt
-  | TyBool
-  | TyUnit
+  | TyNamed of string
+  | TyTuple of type_expr list
   | TyFunc of type_expr list * type_expr
 
 and type_expr = { type_value : type_value; position : position }
 
 let rec print_type type_ =
   match type_ with
-  | TyInt -> "int"
-  | TyBool -> "bool"
-  | TyUnit -> "()"
+  | TyNamed type_ -> type_
+  | TyTuple fields ->
+      "("
+      ^ (List.map (fun field -> print_type field.type_value) fields
+        |> String.concat " * ")
+      ^ ")"
   | TyFunc (params, return) ->
       "["
       ^ (List.map (fun param -> print_type param.type_value) params
@@ -66,9 +72,14 @@ let rec print_type type_ =
 
 let rec equal_type lhs rhs =
   match lhs.type_value with
-  | TyInt -> ( match rhs.type_value with TyInt -> true | _ -> false)
-  | TyBool -> ( match rhs.type_value with TyBool -> true | _ -> false)
-  | TyUnit -> ( match rhs.type_value with TyUnit -> true | _ -> false)
+  | TyNamed l_type -> (
+      match rhs.type_value with TyNamed r_type -> l_type = r_type | _ -> false)
+  | TyTuple fields -> (
+      match rhs.type_value with
+      | TyTuple r_fields ->
+          List.combine fields r_fields
+          |> List.for_all (fun (lhs, rhs) -> equal_type lhs rhs)
+      | _ -> false)
   | TyFunc (params, res) -> (
       match rhs.type_value with
       | TyFunc (r_params, r_res) ->
@@ -83,29 +94,39 @@ type expr =
   | TmOpApp of { operator : operator; lhs : expr_node; rhs : expr_node }
   | TmLet of { name : substring; value : expr_node; expression : expr_node }
   | TmIf of { condition : expr_node; if_true : expr_node; if_false : expr_node }
+  | TmSequence of expr_node list
   | TmParenth of expr_node
 
 and expr_node = { value : expr; position : position }
 
 type parse_error =
-  | ConditionExpressionExpected of position
+  | ConditionExpected of char_position
+  | TrueBranchExpected of char_position
+  | FalseBranchExpected of char_position
   | TokenExpected of token_type * token
   | IdentTokenExpected of token
-  | CannotUseConditionInFunction of position
-  | CannotDefineVariableInFunction of position
+  | VariableNameExpected of token
+  | VariableValueExpected of char_position
   | UnknownOperator of substring
   | ExpectedExpressionAfterOperator of position
   | UnknownType of substring
   | FunctionNameExpected of token
-  | UnexpectedEnd of position
-  | NoPossibleExpression of position
-  | NoFunction of position
-  | NoPossibleType of position
+  | UnexpectedEnd of char_position
+  | NoPossibleExpression of char_position
+  | NoPossibleType of char_position
+  | NoFunction of char_position
 
 let print_error error =
   match error with
-  | ConditionExpressionExpected pos ->
-      Format.sprintf "Condition expression expected on %s" (print_position pos)
+  | ConditionExpected pos ->
+      Format.sprintf "Condition expected after %s" (print_char_position pos)
+  | TrueBranchExpected pos ->
+      Format.sprintf "True branch expected after %s" (print_char_position pos)
+  | FalseBranchExpected pos ->
+      Format.sprintf "False branch expected after %s" (print_char_position pos)
+  | VariableValueExpected pos ->
+      Format.sprintf "Variable value expected after %s"
+        (print_char_position pos)
   | TokenExpected (expected, got) ->
       Format.sprintf "`%s` token expected, got: `%s` on %s"
         (print_token expected) (print_token got.type_)
@@ -114,15 +135,10 @@ let print_error error =
       Format.sprintf "identifier token expected, got: `%s` on %s"
         (print_token tok.type_)
         (print_position tok.position)
-  | CannotUseConditionInFunction pos ->
-      Format.sprintf
-        "Cannot use condition expression inside as an argument without \
-         paretheses (%s)"
-        (print_position pos)
-  | CannotDefineVariableInFunction pos ->
-      Format.sprintf
-        "Cannot define variables inside as an argument without paretheses (%s)"
-        (print_position pos)
+  | VariableNameExpected tok ->
+      Format.sprintf "Variable name expected, got: `%s` on %s"
+        (print_token tok.type_)
+        (print_position tok.position)
   | UnknownOperator { str; position } ->
       Format.sprintf "Unknown operator `%s` used on %s" str
         (print_position position)
@@ -137,13 +153,13 @@ let print_error error =
         (print_token tok.type_)
         (print_position tok.position)
   | UnexpectedEnd pos ->
-      Format.sprintf "Unexpected end on %s" (print_position pos)
+      Format.sprintf "Unexpected end after %s" (print_char_position pos)
   | NoPossibleExpression pos ->
-      Format.sprintf "No possible expression on %s" (print_position pos)
+      Format.sprintf "No possible expression after %s" (print_char_position pos)
   | NoPossibleType pos ->
-      Format.sprintf "No possible type on %s" (print_position pos)
+      Format.sprintf "No possible type after %s" (print_char_position pos)
   | NoFunction pos ->
-      Format.sprintf "No possible function on %s" (print_position pos)
+      Format.sprintf "No possible function after %s" (print_char_position pos)
 
 type implementation = {
   position : position;
@@ -196,8 +212,20 @@ let error_arrow_expected tok : 'a parser =
 let error_ident_expected tok : 'a parser =
  fun rest -> (Error (IdentTokenExpected tok), rest)
 
+let error_variable_name_expected tok : 'a parser =
+ fun rest -> (Error (VariableNameExpected tok), rest)
+
 let error_condition_expected pos : 'a parser =
- fun rest -> (Error (ConditionExpressionExpected pos), rest)
+ fun rest -> (Error (ConditionExpected pos), rest)
+
+let error_true_branch_expected pos : 'a parser =
+ fun rest -> (Error (TrueBranchExpected pos), rest)
+
+let error_false_branch_expected pos : 'a parser =
+ fun rest -> (Error (FalseBranchExpected pos), rest)
+
+let error_variable_value_expected pos : 'a parser =
+ fun rest -> (Error (FalseBranchExpected pos), rest)
 
 let error_else_expected tok : 'a parser =
  fun rest -> (Error (TokenExpected (TkElse, tok)), rest)
@@ -222,12 +250,6 @@ let error_brace_close_expected tok : 'a parser =
 
 let error_colon_expected tok : 'a parser =
  fun rest -> (Error (TokenExpected (TkOperator ":", tok)), rest)
-
-let error_cannot_use_condition pos : 'a parser =
- fun rest -> (Error (CannotUseConditionInFunction pos), rest)
-
-let error_cannot_define_variable pos : 'a parser =
- fun rest -> (Error (CannotDefineVariableInFunction pos), rest)
 
 let error_unknown_operator str : 'a parser =
  fun rest -> (Error (UnknownOperator str), rest)
@@ -260,7 +282,7 @@ let expect_token ~pred ~on_empty ~on_unexpected : token parser =
   with
   | Error (NoPossibleExpression pos), _ ->
       (Error (NoPossibleExpression pos), tokens)
-  | Error (NoPossibleType pos), _ -> (Error (NoPossibleExpression pos), tokens)
+  | Error (NoPossibleType pos), _ -> (Error (NoPossibleType pos), tokens)
   | other -> other
 
 let expect_ident ~on_empty ~on_unexpected : substring parser =
@@ -273,7 +295,7 @@ let expect_ident ~on_empty ~on_unexpected : substring parser =
   with
   | Error (NoPossibleExpression pos), _ ->
       (Error (NoPossibleExpression pos), tokens)
-  | Error (NoPossibleType pos), _ -> (Error (NoPossibleExpression pos), tokens)
+  | Error (NoPossibleType pos), _ -> (Error (NoPossibleType pos), tokens)
   | other -> other
 
 let expect_number ~on_empty ~on_unexpected : (int * position) parser =
@@ -287,5 +309,75 @@ let expect_number ~on_empty ~on_unexpected : (int * position) parser =
   with
   | Error (NoPossibleExpression pos), _ ->
       (Error (NoPossibleExpression pos), tokens)
-  | Error (NoPossibleType pos), _ -> (Error (NoPossibleExpression pos), tokens)
+  | Error (NoPossibleType pos), _ -> (Error (NoPossibleType pos), tokens)
   | other -> other
+
+let parse_nonrequired (parser : char_position -> 'a parser)
+    (cursor_pos : char_position) : 'a option parser =
+ fun tokens ->
+  let res, rest = parser cursor_pos tokens in
+  match res with
+  | Ok expr -> return (Some expr) rest
+  | Error (NoPossibleExpression _) -> return None tokens
+  | Error (NoPossibleType _) -> return None tokens
+  | Error err -> fail err rest
+
+let parse_in_parenth (on_first_error : char_position -> token parser)
+    (parser : char_position -> ('a * position) parser)
+    (cursor_pos : char_position) : ('a * position) parser =
+  let is_parenth_open = function TkParenOpen -> true | _ -> false in
+  let is_parenth_close = function TkParenClose -> true | _ -> false in
+
+  let* open_parenth =
+    expect_token ~pred:is_parenth_open ~on_empty:(on_first_error cursor_pos)
+      ~on_unexpected:(fun _ -> on_first_error cursor_pos)
+  in
+  let* inner, position = parser (snd open_parenth.position) in
+  let* close_parenth =
+    expect_token ~pred:is_parenth_close
+      ~on_empty:(error_unexpected_end (snd position))
+      ~on_unexpected:error_paren_close_expected
+  in
+
+  let position = extend_span open_parenth.position close_parenth.position in
+  return (inner, position)
+
+let parse_in_brackets (on_first_error : char_position -> token parser)
+    (parser : char_position -> ('a * position) parser)
+    (cursor_pos : char_position) : ('a * position) parser =
+  let is_bracket_open = function TkBracketOpen -> true | _ -> false in
+  let is_bracket_close = function TkBracketClose -> true | _ -> false in
+
+  let* open_bracket =
+    expect_token ~pred:is_bracket_open ~on_empty:(on_first_error cursor_pos)
+      ~on_unexpected:(fun _ -> on_first_error cursor_pos)
+  in
+  let* inner, position = parser (snd open_bracket.position) in
+  let* close_bracket =
+    expect_token ~pred:is_bracket_close
+      ~on_empty:(error_unexpected_end (snd position))
+      ~on_unexpected:error_bracket_close_expected
+  in
+
+  let position = extend_span open_bracket.position close_bracket.position in
+  return (inner, position)
+
+let parse_in_braces (on_first_error : char_position -> token parser)
+    (parser : char_position -> ('a * position) parser)
+    (cursor_pos : char_position) : ('a * position) parser =
+  let is_brace_open = function TkBraceOpen -> true | _ -> false in
+  let is_brace_close = function TkBraceClose -> true | _ -> false in
+
+  let* open_bracket =
+    expect_token ~pred:is_brace_open ~on_empty:(on_first_error cursor_pos)
+      ~on_unexpected:(fun _ -> on_first_error cursor_pos)
+  in
+  let* inner, position = parser (snd open_bracket.position) in
+  let* close_bracket =
+    expect_token ~pred:is_brace_close
+      ~on_empty:(error_unexpected_end (snd position))
+      ~on_unexpected:error_brace_close_expected
+  in
+
+  let position = extend_span open_bracket.position close_bracket.position in
+  return (inner, position)
