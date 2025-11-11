@@ -9,6 +9,7 @@ type expr =
   | TmOpApp of { operator : operator; lhs : expr; rhs : expr }
   | TmLet of { name : string; value : expr; expression : expr }
   | TmIf of { condition : expr; if_true : expr; if_false : expr }
+  | TmSequence of expr list
 
 type implementation = {
   name : string;
@@ -39,8 +40,10 @@ let rec cst_expr_to_ast (expr : Cst.expr_node) : expr =
       let lhs = cst_expr_to_ast lhs in
       let rhs = cst_expr_to_ast rhs in
       TmOpApp { operator; lhs; rhs }
+  | Cst.TmSequence expressions ->
+      TmSequence (List.map cst_expr_to_ast expressions)
 
-let rec cst_to_ast (functions : Cst.implementation list)
+let rec cst_functions_to_ast (functions : Cst.implementation list)
     (result : implementation list) =
   match functions with
   | [] -> result
@@ -48,31 +51,46 @@ let rec cst_to_ast (functions : Cst.implementation list)
       let name = func.name.str in
       let parameters = List.map (fun (name, _) -> name.str) func.parameters in
       let expression = cst_expr_to_ast func.expression in
-      cst_to_ast rest ({ name; parameters; expression } :: result)
+      cst_functions_to_ast rest ({ name; parameters; expression } :: result)
 
-let rec print_ast_expr (expr : expr) : string =
+let repeat_space times = String.init times (fun _ -> ' ')
+
+let rec print_ast_expr (indent : int) (expr : expr) : string =
+  let indent = indent + 2 in
+  let print_with_indent expr =
+    "\n" ^ repeat_space indent ^ print_ast_expr indent expr
+  in
   match expr with
   | TmLiteral lit -> Cst.print_literal lit
   | TmApplication { name; arguments } ->
       if List.is_empty arguments then name
       else
-        "(" ^ name ^ " "
-        ^ (List.map print_ast_expr arguments |> String.concat " ")
+        "(" ^ name ^ "\n"
+        ^ (List.map print_with_indent arguments |> String.concat "")
         ^ ")"
   | TmIf { condition; if_true; if_false } ->
-      "(if " ^ print_ast_expr condition ^ " " ^ print_ast_expr if_true ^ " "
-      ^ print_ast_expr if_false ^ ")"
+      "(if "
+      ^ (List.map print_with_indent [ condition; if_true; if_false ]
+        |> String.concat "")
+      ^ ")"
   | TmLet { name; value; expression } ->
-      "(let ([" ^ name ^ " " ^ print_ast_expr value ^ "]) "
-      ^ print_ast_expr expression ^ ")"
+      "(let ([" ^ name ^ " "
+      ^ print_ast_expr indent value
+      ^ "])"
+      ^ print_with_indent expression
+      ^ ")"
   | TmOpApp { operator; lhs; rhs } ->
       "("
       ^ Cst.print_operator operator
-      ^ " " ^ print_ast_expr lhs ^ " " ^ print_ast_expr rhs ^ ")"
+      ^ print_with_indent lhs ^ print_with_indent rhs ^ ")"
+  | TmSequence expressions ->
+      "(begin"
+      ^ (List.map print_with_indent expressions |> String.concat "")
+      ^ ")"
 
-let print_ast (func : implementation) : string =
+let print_functions (func : implementation) : string =
   "(func " ^ func.name ^ " ("
   ^ String.concat " " func.parameters
   ^ ") "
-  ^ print_ast_expr func.expression
+  ^ print_ast_expr 0 func.expression
   ^ ")"

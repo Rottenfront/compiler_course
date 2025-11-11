@@ -207,11 +207,11 @@ let rec parse_expr (cursor_pos : char_position) : expr_node parser =
 
 let rec parse_type (cursor_pos : char_position) : type_expr parser =
   let parse_basic_type (cursor_pos : char_position) : type_expr parser =
-    let* { str; position = _ } =
+    let* { str; position } =
       expect_ident ~on_empty:(error_no_possible_type cursor_pos)
         ~on_unexpected:(fun tok -> error_no_possible_type (snd tok.position))
     in
-    return (TyNamed str)
+    return { type_value = TyNamed str; position }
   in
   let parse_parentheses (cursor_pos : char_position) : type_expr parser =
     let is_parenth_open = function TkParenOpen -> true | _ -> false in
@@ -334,26 +334,28 @@ let parse_func (cursor_pos : char_position) : (implementation * position) parser
         parse_parameters (snd position) ((name, type_) :: parameters)
   in
 
-  let parse_function_data (position : position) :
+  let parse_function_data (cursor_pos : char_position) :
       ((substring * (substring * type_expr) list * type_expr) * position) parser
       =
     let is_colon = function TkIdent ":" -> true | _ -> false in
     let* name =
       expect_ident
-        ~on_empty:(error_unexpected_end position)
+        ~on_empty:(error_unexpected_end cursor_pos)
         ~on_unexpected:error_function_name_expected
     in
-    let* parameters = parse_parameters name.position [] in
+    let* parameters = parse_parameters (snd name.position) [] in
     let last_position =
       if List.is_empty parameters then name.position
       else (List.nth parameters (List.length parameters - 1) |> snd).position
     in
     let* colon_tok =
       expect_token ~pred:is_colon
-        ~on_empty:(error_unexpected_end last_position)
+        ~on_empty:(error_unexpected_end (snd last_position))
         ~on_unexpected:error_colon_expected
     in
-    let* type_ = parse_type colon_tok.position in
+    let* type_ =
+      parse_required parse_type error_type_expected (snd colon_tok.position)
+    in
     let position = extend_span name.position type_.position in
     return ((name, parameters, type_), position)
   in
@@ -361,22 +363,19 @@ let parse_func (cursor_pos : char_position) : (implementation * position) parser
   let is_define = function TkDefine -> true | _ -> false in
 
   let* define_tok =
-    expect_token ~pred:is_define
-      ~on_empty:(error_no_function position)
-      ~on_unexpected:error_define_expected
+    expect_token ~pred:is_define ~on_empty:(error_no_statement cursor_pos)
+      ~on_unexpected:(fun _ -> error_no_statement cursor_pos)
   in
   let* (name, parameters, type_), position =
-    parse_in error_no_possible_type parse_function_data define_tok.position
+    parse_in error_function_data_expected parse_function_data
+      (snd define_tok.position)
   in
-  let* expression = parse_expr position in
-  let expression = distribute_operator expression in
+  let* expression =
+    parse_required parse_expr error_expression_expected (snd position)
+  in
+  (* let expression = distribute_operator expression in *)
   let position = extend_span define_tok.position expression.position in
   return ({ position; name; parameters; type_; expression }, position)
 
 let rec parse_func_statement (cursor_pos : char_position) =
- fun tokens ->
-  let res, rest = parse_in error_no_function parse_func cursor_pos tokens in
-  match res with
-  | Ok (res, _) -> return (Some res) rest
-  | Error (NoFunction _) -> return None rest
-  | Error err -> fail err rest
+  parse_nonrequired (parse_in error_no_statement parse_func) cursor_pos

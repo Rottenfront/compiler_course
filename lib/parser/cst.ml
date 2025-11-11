@@ -9,44 +9,44 @@ let print_literal literal =
   | LitBool true -> "true"
   | LitBool false -> "false"
 
-type builtin_operator_type =
-  | OpAdd
-  | OpSub
-  | OpMul
-  | OpDiv
-  | OpEq
-  | OpNe
-  | OpLess
-  | OpGreater
-  | OpLessEq
-  | OpGreaterEq
-  | OpAnd
-  | OpOr
-  | OpXor
-
-type operator_type = BuiltInOp of builtin_operator_type | UserOp of string
-type operator = { type_ : operator_type; position : position }
-
-let print_builtin_operator operator =
-  match operator with
-  | OpAdd -> "+"
-  | OpSub -> "-"
-  | OpMul -> "*"
-  | OpDiv -> "/"
-  | OpEq -> "=="
-  | OpNe -> "!="
-  | OpLess -> "<"
-  | OpGreater -> ">"
-  | OpLessEq -> "<="
-  | OpGreaterEq -> ">="
-  | OpAnd -> "&&"
-  | OpOr -> "||"
-  | OpXor -> "^"
-
-let print_operator operator =
-  match operator with
-  | BuiltInOp op -> print_builtin_operator op
-  | UserOp op -> op
+(* type builtin_operator_type = *)
+(*   | OpAdd *)
+(*   | OpSub *)
+(*   | OpMul *)
+(*   | OpDiv *)
+(*   | OpEq *)
+(*   | OpNe *)
+(*   | OpLess *)
+(*   | OpGreater *)
+(*   | OpLessEq *)
+(*   | OpGreaterEq *)
+(*   | OpAnd *)
+(*   | OpOr *)
+(*   | OpXor *)
+(**)
+(* type operator_type = BuiltInOp of builtin_operator_type | UserOp of string *)
+(* type operator = { type_ : operator_type; position : position } *)
+(**)
+(* let print_builtin_operator operator = *)
+(*   match operator with *)
+(*   | OpAdd -> "+" *)
+(*   | OpSub -> "-" *)
+(*   | OpMul -> "*" *)
+(*   | OpDiv -> "/" *)
+(*   | OpEq -> "==" *)
+(*   | OpNe -> "!=" *)
+(*   | OpLess -> "<" *)
+(*   | OpGreater -> ">" *)
+(*   | OpLessEq -> "<=" *)
+(*   | OpGreaterEq -> ">=" *)
+(*   | OpAnd -> "&&" *)
+(*   | OpOr -> "||" *)
+(*   | OpXor -> "^" *)
+(**)
+(* let print_operator operator = *)
+(*   match operator with *)
+(*   | BuiltInOp op -> print_builtin_operator op *)
+(*   | UserOp op -> op *)
 
 type type_value =
   | TyNamed of string
@@ -91,7 +91,8 @@ let rec equal_type lhs rhs =
 type expr =
   | TmLiteral of literal
   | TmApplication of { name : substring; arguments : expr_node list }
-  | TmOpApp of { operator : operator; lhs : expr_node; rhs : expr_node }
+  | TmOpApp of { operator : substring; lhs : expr_node; rhs : expr_node }
+  | TmUnaryOp of { operator : substring; argument : expr_node }
   | TmLet of { name : substring; value : expr_node; expression : expr_node }
   | TmIf of { condition : expr_node; if_true : expr_node; if_false : expr_node }
   | TmSequence of expr_node list
@@ -112,12 +113,23 @@ type parse_error =
   | UnknownType of substring
   | FunctionNameExpected of token
   | UnexpectedEnd of char_position
+  | ExpressionExpected of char_position
+  | TypeExpected of char_position
+  | StatementExpected of token
   | NoPossibleExpression of char_position
   | NoPossibleType of char_position
-  | NoFunction of char_position
+  | NoStatement of char_position
+  | FunctionDataExpected of char_position
 
 let print_error error =
   match error with
+  | ExpressionExpected pos ->
+      Format.sprintf "Expresison expected after %s" (print_char_position pos)
+  | FunctionDataExpected pos ->
+      Format.sprintf "Function signature expected after %s"
+        (print_char_position pos)
+  | TypeExpected pos ->
+      Format.sprintf "Type expected after %s" (print_char_position pos)
   | ConditionExpected pos ->
       Format.sprintf "Condition expected after %s" (print_char_position pos)
   | TrueBranchExpected pos ->
@@ -152,14 +164,18 @@ let print_error error =
       Format.sprintf "`then` token expected, got: `%s` on %s"
         (print_token tok.type_)
         (print_position tok.position)
+  | StatementExpected tok ->
+      Format.sprintf "Statement expected, got: `%s` on %s"
+        (print_token tok.type_)
+        (print_position tok.position)
   | UnexpectedEnd pos ->
       Format.sprintf "Unexpected end after %s" (print_char_position pos)
   | NoPossibleExpression pos ->
       Format.sprintf "No possible expression after %s" (print_char_position pos)
   | NoPossibleType pos ->
       Format.sprintf "No possible type after %s" (print_char_position pos)
-  | NoFunction pos ->
-      Format.sprintf "No possible function after %s" (print_char_position pos)
+  | NoStatement pos ->
+      Format.sprintf "No possible statement after %s" (print_char_position pos)
 
 type implementation = {
   position : position;
@@ -263,8 +279,20 @@ let error_no_possible_expression pos : 'a parser =
 let error_no_possible_type pos : 'a parser =
  fun rest -> (Error (NoPossibleType pos), rest)
 
-let error_no_function pos : 'a parser =
- fun rest -> (Error (NoFunction pos), rest)
+let error_no_statement pos : 'a parser =
+ fun rest -> (Error (NoStatement pos), rest)
+
+let error_expression_expected pos : 'a parser =
+ fun rest -> (Error (ExpressionExpected pos), rest)
+
+let error_function_data_expected pos : 'a parser =
+ fun rest -> (Error (FunctionDataExpected pos), rest)
+
+let error_type_expected pos : 'a parser =
+ fun rest -> (Error (TypeExpected pos), rest)
+
+let error_statement_expected tok : 'a parser =
+ fun rest -> (Error (StatementExpected tok), rest)
 
 let error_expected_expression_after_operator pos : 'a parser =
  fun rest -> (Error (ExpectedExpressionAfterOperator pos), rest)
@@ -298,6 +326,20 @@ let expect_ident ~on_empty ~on_unexpected : substring parser =
   | Error (NoPossibleType pos), _ -> (Error (NoPossibleType pos), tokens)
   | other -> other
 
+let expect_operator ~on_empty ~on_unexpected : substring parser =
+ fun tokens ->
+  match
+    match tokens with
+    | { type_ = TkOperator str; position } :: rest ->
+        (Ok { str; position }, rest)
+    | [] -> on_empty []
+    | tok :: rest -> on_unexpected tok rest
+  with
+  | Error (NoPossibleExpression pos), _ ->
+      (Error (NoPossibleExpression pos), tokens)
+  | Error (NoPossibleType pos), _ -> (Error (NoPossibleType pos), tokens)
+  | other -> other
+
 let expect_number ~on_empty ~on_unexpected : (int * position) parser =
  fun tokens ->
   match
@@ -311,6 +353,17 @@ let expect_number ~on_empty ~on_unexpected : (int * position) parser =
       (Error (NoPossibleExpression pos), tokens)
   | Error (NoPossibleType pos), _ -> (Error (NoPossibleType pos), tokens)
   | other -> other
+
+let parse_required (parser : char_position -> 'a parser)
+    (error_on_end : char_position -> 'a parser) (cursor_pos : char_position) :
+    'a parser =
+ fun tokens ->
+  let res, rest = parser cursor_pos tokens in
+  match res with
+  | Ok expr -> return expr rest
+  | Error (NoPossibleExpression pos) -> error_on_end pos tokens
+  | Error (NoPossibleType pos) -> error_on_end pos tokens
+  | Error err -> fail err rest
 
 let parse_nonrequired (parser : char_position -> 'a parser)
     (cursor_pos : char_position) : 'a option parser =
