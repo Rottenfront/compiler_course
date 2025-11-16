@@ -13,10 +13,10 @@ Type is either:
 <type> * <type> * ... * <type>
 ()
 (<type>)
-[<type>...] <type>
+<type> -> <type> -> ... -> <type>
 ```
 
-Function type has more priority over tuples. Stars work simultaneously (`a * b * c` != `a * (b * c)`)
+Tuple type has more priority over function. Stars work simultaneously (`a * b * c` != `a * (b * c)`), arrows are right-associative
 
 You can define your own types with `type` keyword:
 
