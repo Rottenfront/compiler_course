@@ -10,13 +10,13 @@ let read_file path =
   close_in ic;
   s
 
-let test_parse_file language filename () =
+let test_parse_file filename () =
   let path = Filename.concat sample_dir filename in
   let content = read_file path in
   let functions =
     match
-      content |> Lexer.lexer language
-      |> Parser.Language.parse language Parser.Cst.default_position []
+      content |> Lexer.lexer
+      |> Parser.Language.parse Parser.Cst.default_position []
     with
     | Ok functions, _ -> functions
     | Error err, _ ->
@@ -42,6 +42,5 @@ let make_tests language suffix =
 let () =
   run "Parser tests"
     [
-      ("lama samples", make_tests Config.Lama ".cmp");
-      ("racket samples", make_tests Config.Racket ".rkt");
+      ("racket samples", make_tests ".rkt");
     ]

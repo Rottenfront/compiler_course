@@ -1,3 +1,10 @@
 (include_subdirs qualified)
+
 (library
- (name CompilerCourse))
+ (name CompilerCourse)
+ (modules lib ast config lexer parser utils))
+
+(menhir
+ (modules parser))
+
+(ocamllex lexer)
