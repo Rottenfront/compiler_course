@@ -57,6 +57,13 @@ module Compiler = struct
     open Utils
 
     type atm = AtmVar of string | AtmInt of int | AtmBool of bool
+    type builtin_op = OpAnd | OpOr
+
+    let parse_builtin_op func =
+      match func with
+      | "&&" | "and" -> Some OpAnd
+      | "||" | "or" -> Some OpOr
+      | _ -> None
 
     type math_op =
       | OpAdd
@@ -73,17 +80,18 @@ module Compiler = struct
 
     let parse_math_op func =
       match func with
-      | "+" -> OpAdd
-      | "-" -> OpSub
-      | "*" -> OpMul
-      | "/" -> OpDiv
-      | "==" | "eq?" -> OpEq
-      | "!=" | "ne?" -> OpNe
-      | "<" | "lt?" -> OpLess
-      | ">" | "gt?" -> OpGreater
-      | "<=" | "le?" -> OpLessEq
-      | ">=" | "ge?" -> OpGreaterEq
-      | "^" | "xor" -> OpXor
+      | "+" -> Some OpAdd
+      | "-" -> Some OpSub
+      | "*" -> Some OpMul
+      | "/" -> Some OpDiv
+      | "==" | "eq?" -> Some OpEq
+      | "!=" | "ne?" -> Some OpNe
+      | "<" | "lt?" -> Some OpLess
+      | ">" | "gt?" -> Some OpGreater
+      | "<=" | "le?" -> Some OpLessEq
+      | ">=" | "ge?" -> Some OpGreaterEq
+      | "^" | "xor" -> Some OpXor
+      | _ -> None
 
     let print_math_op operator =
       match operator with
@@ -101,114 +109,108 @@ module Compiler = struct
 
     type node =
       | AtmValue of atm
-      | AtmFunction of string * atm list
+      | AtmCall of string * atm list
       | AtmOp of math_op * atm * atm
       | AtmIf of atm * node * node
+      | AtmCreateTuple of atm list
+        (* field tag and variable name (if it is a complex operand, it should
+           be incapsulated into Let)*)
+      | AtmAccessTuple of int * string
       | Let of string * node * node
       | Sequence of node * node
 
     type simplified = Node of node | Atm of atm
 
-    let rec remove_complex_operands variables count expr =
-      let simplify_argument variables count expr =
-        match expr with
-        | TmLiteral lit ->
-            ( Atm
-                (match lit with
-                | LitBool value -> AtmBool value
-                | LitNumber value -> AtmInt value),
-              count )
-        | TmApplication { name; _ } ->
-            if StringMap.mem name variables then (Atm (AtmVar name), count)
-            else
-              let node, count = remove_complex_operands variables count expr in
-              (Node node, count)
-        | other ->
-            let node, count = remove_complex_operands variables count other in
-            (Node node, count)
+    let rec remove_complex_operands count expr =
+      let rec simplify_list count exprs result =
+        match exprs with
+        | [] -> (List.rev result, count)
+        | expr :: exprs ->
+            let expr, count = remove_complex_operands count expr in
+            simplify_list count exprs (expr :: result)
       in
-      let create_let expr result =
-        match expr with
-        | Atm expr, count -> result expr count
-        | Node expr, count ->
-            let arg_name = Format.sprintf "tmp.%d" count in
-            let result, count = result (AtmVar arg_name) (count + 1) in
-            (Let (arg_name, expr, result), count)
+      let rec simplify_sequence exprs =
+        match exprs with
+        | [] -> failwith "Empty sequence"
+        | [ first ] -> first
+        | first :: rest -> Sequence (first, simplify_sequence rest)
+      in
+      let rec simplify_call count name exprs prev_exprs =
+        match exprs with
+        | [] -> (AtmCall (name, List.rev prev_exprs), count)
+        | expr :: rest -> (
+            match expr with
+            | AtmValue value ->
+                simplify_call count name rest (value :: prev_exprs)
+            | complex_expr ->
+                let variable_name = Format.sprintf "tmp.%d" count in
+                let count = count + 1 in
+                let inner, count =
+                  simplify_call count name rest
+                    (AtmVar variable_name :: prev_exprs)
+                in
+                (Let (variable_name, complex_expr, inner), count))
+      in
+      let rec simplify_tuple count exprs prev_exprs =
+        match exprs with
+        | [] -> (AtmCreateTuple (List.rev prev_exprs), count)
+        | expr :: rest -> (
+            match expr with
+            | AtmValue value -> simplify_tuple count rest (value :: prev_exprs)
+            | complex_expr ->
+                let variable_name = Format.sprintf "tmp.%d" count in
+                let count = count + 1 in
+                let inner, count =
+                  simplify_tuple count rest (AtmVar variable_name :: prev_exprs)
+                in
+                (Let (variable_name, complex_expr, inner), count))
       in
       match expr with
-      | TmLiteral lit ->
-          ( (match lit with
-            | LitBool value -> AtmValue (AtmBool value)
-            | LitNumber value -> AtmValue (AtmInt value)),
-            count )
-      | TmApplication { name; arguments } ->
-          if StringMap.mem name variables then (AtmValue (AtmVar name), count)
-          else
-            let rec simplify_function variables name args prev_args count =
-              match args with
-              | [] -> (AtmFunction (name, List.rev prev_args), count)
-              | arg :: rest ->
-                  create_let (simplify_argument variables count arg)
-                    (fun atm count ->
-                      simplify_function variables name rest (atm :: prev_args)
-                        count)
-            in
-            simplify_function variables name arguments [] count
-      | TmOpApp { operator; lhs; rhs } -> (
-          match operator with
-          | OpSemicolon ->
-              let lhs, count = remove_complex_operands variables count lhs in
-              let rhs, count = remove_complex_operands variables count rhs in
-              (Sequence (lhs, rhs), count)
-          | op ->
-              create_let (simplify_argument variables count lhs)
-                (fun lhs count ->
-                  match op with
-                  | OpAnd ->
-                      let rhs, count =
-                        remove_complex_operands variables count rhs
-                      in
-                      (AtmIf (lhs, rhs, AtmValue (AtmBool false)), count)
-                  | OpOr ->
-                      let rhs, count =
-                        remove_complex_operands variables count rhs
-                      in
-                      (AtmIf (lhs, rhs, AtmValue (AtmBool false)), count)
-                  | other ->
-                      let op =
-                        match other with
-                        | OpAdd -> OpAdd
-                        | OpSub -> OpSub
-                        | OpMul -> OpMul
-                        | OpDiv -> OpDiv
-                        | OpEq -> OpEq
-                        | OpNe -> OpNe
-                        | OpLess -> OpLess
-                        | OpGreater -> OpGreater
-                        | OpLessEq -> OpLessEq
-                        | OpGreaterEq -> OpGreaterEq
-                        | OpXor -> OpXor
-                        | _ -> failwith "unreachable"
-                      in
-                      create_let (simplify_argument variables count rhs)
-                        (fun rhs count -> (AtmOp (op, lhs, rhs), count))))
-      | TmLet { name; value; expression } ->
-          let value, count = remove_complex_operands variables count value in
-          let variables = StringMap.add name true variables in
-          let expression, count =
-            remove_complex_operands variables count expression
-          in
-          (Let (name, value, expression), count)
-      | TmIf { condition; if_true; if_false } ->
-          create_let (simplify_argument variables count condition)
-            (fun cond count ->
-              let lhs, count =
-                remove_complex_operands variables count if_true
-              in
-              let rhs, count =
-                remove_complex_operands variables count if_false
-              in
-              (AtmIf (cond, lhs, rhs), count))
+      | TmInt value -> (AtmValue (AtmInt value), count)
+      | TmBool value -> (AtmValue (AtmBool value), count)
+      | TmVar value -> (AtmValue (AtmVar value), count)
+      | TmCall (name, exprs) ->
+          let exprs, count = simplify_list count exprs [] in
+          simplify_call count name exprs []
+      | TmIf (cond, tru, fls) -> (
+          let cond, count = remove_complex_operands count cond in
+          let tru, count = remove_complex_operands count tru in
+          let fls, count = remove_complex_operands count fls in
+          match cond with
+          | AtmValue atm -> (AtmIf (atm, tru, fls), count)
+          | complex_expr ->
+              let variable_name = Format.sprintf "tmp.%d" count in
+              let count = count + 1 in
+              ( Let
+                  ( variable_name,
+                    complex_expr,
+                    AtmIf (AtmVar variable_name, tru, fls) ),
+                count ))
+      | TmCreateTuple exprs ->
+          let exprs, count = simplify_list count exprs [] in
+          simplify_tuple count exprs []
+      | TmAccessTuple (tag, expr) -> (
+          let expr, count = remove_complex_operands count expr in
+          match expr with
+          | AtmValue atm -> (
+              match atm with
+              | AtmVar var -> (AtmAccessTuple (tag, var), count)
+              | _ -> failwith "Type error: cannot use AccessTuple on literals")
+          | complex_expr ->
+              let variable_name = Format.sprintf "tmp.%d" count in
+              let count = count + 1 in
+              ( Let
+                  ( variable_name,
+                    complex_expr,
+                    AtmAccessTuple (tag, variable_name) ),
+                count ))
+      | TmLet (name, value, expr) ->
+          let value, count = remove_complex_operands count value in
+          let expr, count = remove_complex_operands count expr in
+          (Let (name, value, expr), count)
+      | TmSeq exprs ->
+          let exprs, count = simplify_list count exprs [] in
+          (simplify_sequence exprs, count)
 
     let print_atm atm =
       match atm with
@@ -219,7 +221,7 @@ module Compiler = struct
     let rec print_monadic expr =
       match expr with
       | AtmValue atm -> print_atm atm
-      | AtmFunction (name, parameters) ->
+      | AtmCall (name, parameters) ->
           "(" ^ name
           ^ (List.map (fun param -> " " ^ print_atm param) parameters
             |> String.concat "")
@@ -263,7 +265,7 @@ module Compiler = struct
       | AtmValue atm ->
           let expr = Atm atm in
           return_expr name expr
-      | AtmFunction (func, args) ->
+      | AtmCall (func, args) ->
           let expr = Function (func, args) in
           return_expr name expr
       | AtmOp (op, lhs, rhs) ->
