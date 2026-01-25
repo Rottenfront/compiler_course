@@ -2,7 +2,7 @@
 
 (library
  (name CompilerCourse)
- (modules lib ast config lexer parser utils))
+ (modules lib ast config checker lexer parser utils))
 
 (menhir
  (modules parser))

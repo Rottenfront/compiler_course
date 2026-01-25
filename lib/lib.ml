@@ -237,6 +237,12 @@ module Compiler = struct
           ^ print_monadic expression ^ ")"
       | Sequence (lhs, rhs) ->
           "(begin " ^ print_monadic lhs ^ " " ^ print_monadic rhs ^ ")"
+      | AtmCreateTuple exprs ->
+          "(vector "
+          ^ (List.map (fun param -> print_atm param) exprs |> String.concat " ")
+          ^ ")"
+      | AtmAccessTuple (id, name) ->
+          "(get " ^ string_of_int id ^ " " ^ name ^ ")"
   end
 
   module ExplicateControl = struct
@@ -249,6 +255,8 @@ module Compiler = struct
 
     type stmt =
       | Assign of string * exp
+      | Bind of string * exp
+      | Unbind of string
       | Return of exp
       | CMov of atm * int
       | Jmp of int
