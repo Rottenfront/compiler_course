@@ -10,9 +10,11 @@ type check_error =
   | NonexistentFunction of substring
   | NotAFunction of substring * int
   | UnexpectedArgumentCount of substring * int * int
+  | InvalidEntryPoint
 
 let print_error error =
   match error with
+  | InvalidEntryPoint -> "main must have no parameters and return int or ()"
   | UnsupportedHighOrderFunctions pos ->
       Format.sprintf
         "High-order functions are not yet supported, position of type: %s"
@@ -25,7 +27,7 @@ let print_error error =
         (print_type type2.type_value)
         (print_position type2.position)
   | DoubleDeclaration name ->
-      Format.sprintf "Double declaration of function '%s' on %s" name.str
+      Format.sprintf "Double declaration of name '%s' on %s" name.str
         (print_position name.position)
   | NonexistentFunction name ->
       Format.sprintf "No function with name '%s' found, usage: %s" name.str
@@ -54,34 +56,52 @@ let rec get_type (context : check_context) (expr : expr_node) : type_expr option
     =
   let position = expr.position in
   (match expr.value with
-  | TmLiteral lit ->
-      Some
-        {
-          type_value =
-            (match lit with LitNumber _ -> TyInt | LitBool _ -> TyBool);
-          position;
-        }
-  | TmApplication { name; arguments = _ } ->
-      if StringMap.mem name.str context.functions then
+    | TmLiteral lit ->
         Some
-          { type_value = StringMap.find name.str context.functions; position }
-      else None
-  | TmOpApp { lhs = _; operator; rhs } -> (
-      match operator.type_ with
-      | OpSemicolon -> get_type context rhs
-      | other ->
+          {
+            type_value =
+              (match lit with
+              | LitNumber _ -> TyInt
+              | LitBool _ -> TyBool
+              | LitUnit -> TyUnit);
+            position;
+          }
+    | TmApplication { name; arguments = _ } ->
+        if StringMap.mem name.str context.functions then
           Some
-            (match other with
-            | OpAdd | OpSub | OpMul | OpDiv -> { type_value = TyInt; position }
-            | OpEq | OpNe | OpLess | OpGreater | OpLessEq | OpGreaterEq | OpAnd
-            | OpOr | OpXor ->
-                { type_value = TyBool; position }
-            | OpSemicolon -> failwith "unreachable"))
-  | TmIf { condition = _; if_true; if_false = _ } -> get_type context if_true
-  | TmLet { name = _; value = _; expression } -> get_type context expression
-  | TmParenth expr -> get_type context expr)
+            {
+              type_value =
+                get_result_type (StringMap.find name.str context.functions);
+              position;
+            }
+        else None
+    | TmOpApp { lhs = _; operator; rhs } -> (
+        match operator.type_ with
+        | OpSemicolon -> get_type context rhs
+        | other ->
+            Some
+              (match other with
+              | OpAdd | OpSub | OpMul | OpDiv ->
+                  { type_value = TyInt; position }
+              | OpEq | OpNe | OpLess | OpGreater | OpLessEq | OpGreaterEq
+              | OpAnd | OpOr | OpXor ->
+                  { type_value = TyBool; position }
+              | OpSemicolon -> failwith "unreachable"))
+    | TmIf { condition = _; if_true; if_false = _ } -> get_type context if_true
+    | TmLet { name; value; expression } ->
+        let context =
+          match get_type context value with
+          | None -> context
+          | Some type_ ->
+              {
+                functions =
+                  StringMap.add name.str type_.type_value context.functions;
+              }
+        in
+        get_type context expression
+    | TmParenth expr -> get_type context expr)
   |> Option.map (fun { type_value; position = _ } ->
-         { type_value; position = expr.position })
+      { type_value; position = expr.position })
 
 let rec check_expression (context : check_context) expected_type exp =
   let current_type = get_type context exp in
@@ -106,7 +126,11 @@ let rec check_expression (context : check_context) expected_type exp =
             | [] -> [])
         | [] -> []
       in
-      match current_type with
+      match
+        StringMap.find_opt name.str context.functions
+        |> Option.map (fun type_value ->
+            { type_value; position = exp.position })
+      with
       | None -> [ NonexistentFunction name ]
       | Some current -> (
           match current.type_value with
@@ -206,16 +230,15 @@ let rec check_expression (context : check_context) expected_type exp =
           check_int context lhs rhs
           |> match_expected expected_type
                { type_value = TyInt; position = exp.position }
-      | OpEq | OpNe -> (
-          match current_type with
-          | Some { type_value = TyBool; position = _ } ->
-              check_bool context lhs rhs
-              |> match_expected expected_type
-                   { type_value = TyBool; position = exp.position }
-          | _ ->
-              check_int context lhs rhs
-              |> match_expected expected_type
-                   { type_value = TyBool; position = exp.position })
+      | OpEq | OpNe ->
+          let errors = check_expression context None lhs in
+          let errors =
+            List.append errors
+              (check_expression context (get_type context lhs) rhs)
+          in
+          errors
+          |> match_expected expected_type
+               { type_value = TyBool; position = exp.position }
       | OpLess | OpGreater | OpLessEq | OpGreaterEq ->
           check_int context lhs rhs
           |> match_expected expected_type
@@ -266,6 +289,21 @@ let rec create_context (context : check_context) errors
   | [] -> (context, errors)
 
 let check_impl (context : check_context) impl =
+  let signature_errors =
+    impl.type_ :: List.map snd impl.parameters
+    |> List.filter_map (fun type_ ->
+        match type_.type_value with
+        | TyFunc _ -> Some (UnsupportedHighOrderFunctions type_.position)
+        | _ -> None)
+  in
+  let _, parameter_errors =
+    List.fold_left
+      (fun (names, errors) (name, _) ->
+        if StringMap.mem name.str names then
+          (names, DoubleDeclaration name :: errors)
+        else (StringMap.add name.str () names, errors))
+      (StringMap.empty, []) impl.parameters
+  in
   let context =
     {
       functions =
@@ -276,7 +314,11 @@ let check_impl (context : check_context) impl =
           context.functions;
     }
   in
-  check_expression context (Some impl.type_) impl.expression
+  if not (List.is_empty signature_errors) then
+    List.append signature_errors parameter_errors
+  else
+    List.append parameter_errors
+      (check_expression context (Some impl.type_) impl.expression)
 
 let rec check_impls context errors impls =
   match impls with
@@ -287,4 +329,9 @@ let rec check_impls context errors impls =
 
 let check_program impls =
   let context, errors = create_context default_context [] impls in
+  let errors =
+    match StringMap.find_opt "main" context.functions with
+    | Some (TyFunc ([], { type_value = TyInt | TyUnit; _ })) -> errors
+    | _ -> InvalidEntryPoint :: errors
+  in
   check_impls context errors impls

@@ -1,0 +1,50 @@
+cabal-version: 3.0
+name: haskell-course
+version: 0.1.0.0
+synopsis: A small compiler with interchangeable syntax and Linux backends
+license: MIT
+license-file: LICENSE
+author: Compiler course contributors
+maintainer: Compiler course contributors
+category: Compilers
+description: Parsec frontends for Caml-like and LISP-like syntax, a shared typed
+             representation, and AArch64 Linux and x86_64 Linux assembly backends.
+build-type: Simple
+extra-source-files: README.md, examples/*.cmp, examples/*.rkt
+
+common defaults
+  default-language: Haskell2010
+  ghc-options: -Wall -Wcompat
+  build-depends: base >=4.14 && <5, containers >=0.6 && <0.9,
+                 parsec >=3.1 && <3.2, mtl >=2.2 && <2.4
+
+library
+  import: defaults
+  hs-source-dirs: src
+  exposed-modules:
+    Course.Syntax
+    Course.Parser
+    Course.Parser.Common
+    Course.Parser.Caml
+    Course.Parser.Lisp
+    Course.Check
+    Course.IR
+    Course.Lower
+    Course.Backend.Linux
+    Course.Backend.AArch64
+    Course.Backend.X86_64
+    Course.Compiler
+
+executable haskell-course
+  import: defaults
+  hs-source-dirs: app
+  main-is: Main.hs
+  build-depends: haskell-course
+
+test-suite compiler-tests
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  build-depends: haskell-course, directory >=1.3 && <1.4,
+                 filepath >=1.4 && <1.6, process >=1.6 && <1.7

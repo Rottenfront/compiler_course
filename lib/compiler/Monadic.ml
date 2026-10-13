@@ -47,6 +47,7 @@ let rec remove_complex_operands variables count expr =
         ( Atm
             (match lit with
             | LitBool value -> AtmBool value
+            | LitUnit -> AtmInt 0
             | LitNumber value -> AtmInt value),
           count )
     | TmApplication { name; _ } ->
@@ -70,6 +71,7 @@ let rec remove_complex_operands variables count expr =
   | TmLiteral lit ->
       ( (match lit with
         | LitBool value -> AtmValue (AtmBool value)
+        | LitUnit -> AtmValue (AtmInt 0)
         | LitNumber value -> AtmValue (AtmInt value)),
         count )
   | TmApplication { name; arguments } ->
@@ -102,7 +104,7 @@ let rec remove_complex_operands variables count expr =
                   let rhs, count =
                     remove_complex_operands variables count rhs
                   in
-                  (AtmIf (lhs, rhs, AtmValue (AtmBool false)), count)
+                  (AtmIf (lhs, AtmValue (AtmBool true), rhs), count)
               | other ->
                   let op =
                     match other with

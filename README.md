@@ -1,7 +1,37 @@
 # Compiler course language
 
 This repo contains compiler, that supports (should support) several syntaxes.
-Right now Lama syntax is implemented.
+Lama (Caml-like) and Racket (LISP-like) syntaxes are implemented.
+
+The standalone [Haskell implementation](haskell_course/README.md) uses Parsec and
+supports AArch64 Linux and x86_64 Linux with shared language semantics.
+
+## Build and test
+
+The OCaml implementation uses Dune 3.19 or newer and Alcotest for tests:
+
+```sh
+dune build
+dune test
+dune exec CompilerCourse -- -source lama -arch arm64-linux test/samples/2.cmp -o /tmp/fib.s
+```
+
+`test/dune` declares `samples/` as a source-tree dependency. Dune automatically
+copies these fixtures into `_build/default/test/samples/` and makes them available
+in the test sandbox. Adding or changing samples causes the tests to run again.
+
+Linux ARM64 execution regressions can be run with a cross compiler and QEMU:
+
+```sh
+AARCH64_CC=aarch64-linux-gnu-gcc AARCH64_RUNNER=qemu-aarch64 \
+  QEMU_LD_PREFIX=/usr/aarch64-linux-gnu python3 test/run_linux_regressions.py
+```
+
+Use `--cc gcc --runner ''` on native ARM64 Linux, or `--static` when static libc is
+available. The Linux backend uses AAPCS64 for libc calls, preserves stack arguments
+and locals across calls, and reuses its frame for self-tail recursion. Boolean OR
+short-circuits correctly; arithmetic operators associate left. Unit literals are
+represented as zero, and parsers reject unconsumed input.
 
 ## Lama syntax
 

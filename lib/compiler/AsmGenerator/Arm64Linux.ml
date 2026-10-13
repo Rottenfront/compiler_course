@@ -4,339 +4,218 @@ open AssignHomes
 open Utils
 
 let align16 n = (n + 15) / 16 * 16
-let add_line acc s = acc := !acc ^ s ^ "\n"
-let buffer_reg = "x9"
-let second_buffer_reg = "x10"
-let additional_buffer_reg = "x11"
+let add_line out s = Buffer.add_string out (s ^ "\n")
 
-(* let temp_regs =
-  [ "x19"; "x20"; "x21"; "x22"; "x23"; "x24"; "x25"; "x26"; "x27"; "x28" ] *)
-let temp_regs = []
-let input_regs = [ "x0"; "x1"; "x2"; "x3"; "x4"; "x5"; "x6"; "x7" ]
-let stack_position sp_shift index = sp_shift - (index * 8)
+let load_integer out reg value =
+  let value = Int64.of_int value in
+  for i = 0 to 3 do
+    let chunk =
+      Int64.logand (Int64.shift_right_logical value (16 * i)) 0xffffL
+    in
+    if i = 0 then add_line out (Format.sprintf "    movz %s, #%Ld" reg chunk)
+    else if chunk <> 0L then
+      add_line out
+        (Format.sprintf "    movk %s, #%Ld, lsl #%d" reg chunk (16 * i))
+  done
 
-let compile_instruction out function_name sp_shift instruction =
+(* Homes are relative to the saved frame pointer, so outgoing arguments do not
+   change local addresses. Negative homes denote incoming stack arguments. *)
+let stack_address out index =
+  load_integer out "x12" (abs index * 8);
+  add_line out
+    (if index >= 0 then "    sub x12, x29, x12" else "    add x12, x29, x12")
+
+let load_data out reg = function
+  | BasicInt value -> load_integer out reg value
+  | BasicReg (Reg source) ->
+      add_line out (Format.sprintf "    mov %s, %s" reg source)
+  | BasicReg (Stack index) ->
+      stack_address out index;
+      add_line out (Format.sprintf "    ldr %s, [x12]" reg)
+
+let store_data out home reg =
+  match home with
+  | Reg dest -> add_line out (Format.sprintf "    mov %s, %s" dest reg)
+  | Stack index ->
+      stack_address out index;
+      add_line out (Format.sprintf "    str %s, [x12]" reg)
+
+let compile_instruction out function_name instruction =
+  let label index = Format.sprintf ".L%s_%d" function_name index in
   match instruction with
-  | MovIns (dest, data) -> (
-      match dest with
-      | Reg dest -> (
-          match data with
-          | BasicInt int ->
-              Format.sprintf "    mov %s, %d" dest int |> add_line out
-          | BasicReg (Reg src) ->
-              Format.sprintf "    mov %s, %s" dest src |> add_line out
-          | BasicReg (Stack index) ->
-              Format.sprintf "    ldr %s, [sp, #%d]" dest
-                (stack_position sp_shift index)
-              |> add_line out)
-      | Stack dest ->
-          let src =
-            match data with
-            | BasicInt int ->
-                Format.sprintf "    mov %s, %d" buffer_reg int |> add_line out;
-                buffer_reg
-            | BasicReg (Reg src) -> src
-            | BasicReg (Stack src) ->
-                Format.sprintf "    ldr %s, [sp, #%d]" buffer_reg
-                  (stack_position sp_shift src)
-                |> add_line out;
-                buffer_reg
+  | MovIns (dest, source) ->
+      load_data out "x9" source;
+      store_data out dest "x9"
+  | OpIns (dest, op, lhs, rhs) ->
+      load_data out "x9" lhs;
+      load_data out "x10" rhs;
+      (match op with
+      | OpAdd -> add_line out "    add x9, x9, x10"
+      | OpSub -> add_line out "    sub x9, x9, x10"
+      | OpMul -> add_line out "    mul x9, x9, x10"
+      | OpDiv -> add_line out "    sdiv x9, x9, x10"
+      | OpXor -> add_line out "    eor x9, x9, x10"
+      | OpEq | OpNe | OpLess | OpGreater | OpLessEq | OpGreaterEq ->
+          let condition =
+            match op with
+            | OpEq -> "eq"
+            | OpNe -> "ne"
+            | OpLess -> "lt"
+            | OpGreater -> "gt"
+            | OpLessEq -> "le"
+            | OpGreaterEq -> "ge"
+            | _ -> assert false
           in
-          Format.sprintf "    str %s, [sp, #%d]" src
-            (stack_position sp_shift dest)
-          |> add_line out)
-  | OpIns (dest, op, lhs, rhs) -> (
-      let lhs =
-        match lhs with
-        | BasicInt int ->
-            Format.sprintf "    mov %s, %d" buffer_reg int |> add_line out;
-            buffer_reg
-        | BasicReg (Reg src) -> src
-        | BasicReg (Stack src) ->
-            Format.sprintf "    ldr %s, [sp, #%d]" buffer_reg
-              (stack_position sp_shift src)
-            |> add_line out;
-            buffer_reg
-      in
-      let rhs =
-        match rhs with
-        | BasicInt int ->
-            Format.sprintf "    mov %s, %d" additional_buffer_reg int
-            |> add_line out;
-            additional_buffer_reg
-        | BasicReg (Reg src) -> src
-        | BasicReg (Stack src) ->
-            Format.sprintf "    ldr %s, [sp, #%d]" additional_buffer_reg
-              (stack_position sp_shift src)
-            |> add_line out;
-            additional_buffer_reg
-      in
-      let compile_operator =
-       fun dest op ->
-        match op with
-        | OpAdd ->
-            add_line out (Format.sprintf "    add %s, %s, %s" dest lhs rhs)
-        | OpSub ->
-            add_line out (Format.sprintf "    sub %s, %s, %s" dest lhs rhs)
-        | OpMul ->
-            add_line out (Format.sprintf "    mul %s, %s, %s" dest lhs rhs)
-        | OpDiv ->
-            add_line out (Format.sprintf "    sdiv %s, %s, %s" dest lhs rhs)
-        | OpXor ->
-            add_line out (Format.sprintf "    eor %s, %s, %s" dest lhs rhs)
-        | OpEq | OpNe | OpLess | OpGreater | OpLessEq | OpGreaterEq ->
-            add_line out (Format.sprintf "    cmp %s, %s" lhs rhs);
-            let cond =
-              match op with
-              | OpEq -> "eq"
-              | OpNe -> "ne"
-              | OpLess -> "lt"
-              | OpGreater -> "gt"
-              | OpLessEq -> "le"
-              | OpGreaterEq -> "ge"
-              | _ -> assert false
-            in
-            add_line out (Format.sprintf "    cset %s, %s" dest cond)
-      in
-      match dest with
-      | Reg reg -> compile_operator reg op
-      | Stack index ->
-          compile_operator second_buffer_reg op;
-          add_line out
-            (Format.sprintf "    str %s, [sp, #%d]" second_buffer_reg
-               (stack_position sp_shift index)))
-  | CMovIns (cond, label) ->
-      let cond =
-        match cond with
-        | BasicInt int ->
-            Format.sprintf "    mov %s, %d" buffer_reg int |> add_line out;
-            buffer_reg
-        | BasicReg (Reg src) -> src
-        | BasicReg (Stack src) ->
-            Format.sprintf "    ldr %s, [sp, #%d]" buffer_reg
-              (stack_position sp_shift src)
-            |> add_line out;
-            buffer_reg
-      in
-      add_line out (Format.sprintf "    cbnz %s, label_%d" cond label)
-  | JmpIns label -> add_line out (Format.sprintf "    b label_%d" label)
-  | LblIns label -> add_line out (Format.sprintf "label_%d:" label)
+          add_line out "    cmp x9, x10";
+          add_line out ("    cset x9, " ^ condition));
+      store_data out dest "x9"
+  | CMovIns (test, target) ->
+      load_data out "x9" test;
+      add_line out ("    cbnz x9, " ^ label target)
+  | JmpIns target -> add_line out ("    b " ^ label target)
+  | LblIns target -> add_line out (label target ^ ":")
   | FuncIns (dest, name, args) ->
-      let load_arg =
-       fun shift dest arg ->
-        match arg with
-        | BasicReg (Reg src) ->
-            Format.sprintf "    mov %s, %s" dest src |> add_line out
-        | BasicReg (Stack src) ->
-            Format.sprintf "    ldr %s, [sp, #%d]" dest
-              (stack_position (sp_shift + shift) src)
-            |> add_line out
-        | BasicInt int ->
-            Format.sprintf "    mov %s, %d" dest int |> add_line out
-      in
-      (* tail recursion *)
-      List.take 8 args
-      |> List.mapi (fun index arg -> load_arg 0 ("x" ^ string_of_int index) arg)
-      |> List.fold_left (fun _ _ -> ()) ();
+      let rest = List.drop 8 args in
+      let outgoing = align16 (List.length rest * 8) in
+      if outgoing > 0 then (
+        load_integer out "x9" outgoing;
+        add_line out "    sub sp, sp, x9");
+      List.iteri
+        (fun index arg ->
+          load_data out "x9" arg;
+          load_integer out "x12" (index * 8);
+          add_line out "    add x12, sp, x12";
+          add_line out "    str x9, [x12]")
+        rest;
+      List.iteri
+        (fun index arg -> load_data out ("x" ^ string_of_int index) arg)
+        (List.take 8 args);
       if dest = Reg "x0" && name = function_name then (
-        if List.length args > 8 then (
-          let rest_args =
-            args |> List.rev |> List.take (List.length args - 8) |> List.rev
-          in
-          let shift = List.length rest_args |> ( * ) 8 |> align16 in
-          add_line out (Format.sprintf "    sub sp, sp, #%d" shift);
-          List.mapi
-            (fun index arg ->
-              load_arg shift buffer_reg arg;
-              add_line out
-                (Format.sprintf "    str %s, [sp, #%d]" buffer_reg (index * 8)))
-            rest_args
-          |> List.fold_left (fun _ _ -> ()) ();
-          List.mapi
-            (fun index _ ->
-              add_line out
-                (Format.sprintf "    ldr %s, [sp, #%d]" buffer_reg (index * 8));
-              add_line out
-                (Format.sprintf "    str %s, [sp, #%d]" buffer_reg
-                   (stack_position (sp_shift + shift) (-1 - index))))
-            rest_args
-          |> List.fold_left (fun _ _ -> ()) ();
-          add_line out (Format.sprintf "    add sp, sp, #%d" shift))
-        else ();
-        add_line out (Format.sprintf "    b start_%s" function_name))
+        (* Stage all stack arguments before overwriting any incoming home. *)
+        List.iteri
+          (fun index _ ->
+            load_integer out "x12" (index * 8);
+            add_line out "    add x12, sp, x12";
+            add_line out "    ldr x9, [x12]";
+            store_data out (Stack (-2 - index)) "x9")
+          rest;
+        if outgoing > 0 then (
+          load_integer out "x9" outgoing;
+          add_line out "    add sp, sp, x9");
+        add_line out ("    b .Lstart_" ^ function_name))
       else (
-        if List.length args > 8 then (
-          let rest_args =
-            args |> List.rev |> List.take (List.length args - 8) |> List.rev
-          in
-          let shift = List.length rest_args |> align16 in
-          add_line out (Format.sprintf "    sub sp, sp, #%d" shift);
-          List.mapi
-            (fun index arg ->
-              load_arg shift buffer_reg arg;
-              add_line out
-                (Format.sprintf "    str %s, [sp, #%d]" buffer_reg (index * 8)))
-            rest_args
-          |> List.fold_left (fun _ _ -> ()) ();
-          add_line out (Format.sprintf "    bl %s" name);
-          add_line out (Format.sprintf "    add sp, sp, #%d" shift))
-        else add_line out (Format.sprintf "    bl %s" name);
-        match dest with
-        | Stack index ->
-            add_line out
-              (Format.sprintf "    str x0, [sp, #%d]"
-                 (stack_position sp_shift index))
-        | Reg reg -> add_line out (Format.sprintf "    mov %s, x0" reg))
+        add_line out ("    bl " ^ name);
+        if outgoing > 0 then (
+          load_integer out "x9" outgoing;
+          add_line out "    add sp, sp, x9");
+        store_data out dest "x0")
 
-let compile_function name params instructions (homes : reg StringMap.t) =
-  let frame_size =
-    StringMap.fold
-      (fun _ home max_width ->
-        match home with Stack value -> max value max_width | _ -> max_width)
-      homes 0
-    |> ( * ) 8 |> align16
+let compile_function name parameters statements =
+  let homes =
+    parameters
+    |> List.mapi (fun index name ->
+        (name, Stack (if index < 8 then index + 1 else -2 - (index - 8))))
+    |> StringMap.of_list
   in
-  let out = ref "" in
+  (* Never recycle slots across branches: linear usage counts do not model
+     control-flow liveness, and can overwrite values still needed at a join. *)
+  let next = ref (min 8 (List.length parameters) + 1) in
+  let homes =
+    List.fold_left
+      (fun homes statement ->
+        match statement with
+        | ExplicateControl.Assign (name, _) when not (StringMap.mem name homes)
+          ->
+            let index = !next in
+            incr next;
+            StringMap.add name (Stack index) homes
+        | _ -> homes)
+      homes statements
+  in
+  let frame_size = align16 ((!next - 1) * 8) in
+  let out = Buffer.create 1024 in
   add_line out ".text";
+  add_line out ".balign 4";
   add_line out (".global " ^ name);
+  add_line out (".type " ^ name ^ ", %function");
   add_line out (name ^ ":");
-  add_line out "    stp fp, lr, [sp, #-16]!";
-  add_line out ("start_" ^ name ^ ":");
-  add_line out (Format.sprintf "    sub sp, sp, #%d" frame_size);
-
-  List.take 8 params
-  |> List.fold_left
-       (fun index _ ->
-         add_line out
-           (Format.sprintf "    str x%d, [sp, #%d]" index
-              (stack_position frame_size (index + 1)));
-         index + 1)
-       0
-  |> fun _ ->
-  ();
-
-  List.map
-    (fun instruction -> compile_instruction out name frame_size instruction)
-    instructions
-  |> List.fold_left (fun _ _ -> ()) ();
-
-  add_line out (Format.sprintf "    add sp, sp, #%d" frame_size);
-  add_line out "    ldp fp, lr, [sp], #16";
+  add_line out "    stp x29, x30, [sp, #-16]!";
+  add_line out "    mov x29, sp";
+  load_integer out "x9" frame_size;
+  add_line out "    sub sp, sp, x9";
+  (* Tail calls restart after frame allocation and refresh register parameters. *)
+  add_line out (".Lstart_" ^ name ^ ":");
+  List.iteri
+    (fun index _ ->
+      store_data out (Stack (index + 1)) ("x" ^ string_of_int index))
+    (List.take 8 parameters);
+  List.iter
+    (fun statement ->
+      BasicInstructions.compile_statement statement homes
+      |> compile_instruction out name)
+    statements;
+  add_line out "    mov sp, x29";
+  add_line out "    ldp x29, x30, [sp], #16";
   add_line out "    ret";
-  !out
+  add_line out (".size " ^ name ^ ", .-" ^ name);
+  Buffer.contents out
 
 type function_data = Generator.function_data
 
-let rec compile_functions (functions : function_data list)
-    (declarations : string list) (cons : string) =
-  match functions with
-  | [] -> cons
-  | { name; parameters; statements } :: rest ->
-      let params_map =
-        parameters |> List.map (fun param -> (param, 0)) |> StringMap.of_list
-      in
-      let variables = AssignHomes.analyze_variable_use statements params_map in
-      let stack_list =
-        List.take 8 parameters
-        |> List.fold_left_map (fun index name -> (index + 1, (name, index))) 1
-        |> snd
-        |> List.append
-             (List.drop 8 parameters
-             |> List.fold_left_map
-                  (fun index name -> (index - 1, (name, index)))
-                  (-2)
-             |> snd)
-        |> StringMap.of_list
-      in
-      let homes =
-        StringMap.map (fun index -> AssignHomes.Stack index) stack_list
-      in
-      let homes =
-        AssignHomes.assign_homes statements
-          {
-            variables;
-            register_table =
-              temp_regs
-              |> List.map (fun reg -> (reg, None))
-              |> StringMap.of_list;
-            stack_table = stack_list;
-            free_stack = [];
-          }
-          homes
-      in
-      let instructions =
-        List.map
-          (fun stmt -> BasicInstructions.compile_statement stmt homes)
-          statements
-      in
-      let cons =
-        cons ^ "\n" ^ compile_function name parameters instructions homes
-      in
-      compile_functions rest declarations cons
+let runtime =
+  {|.section .rodata
+fmt_true: .asciz "true\n"
+fmt_false: .asciz "false\n"
+fmt_read: .asciz "%lld"
+fmt_int: .asciz "%lld\n"
+.text
+.balign 4
+.global print_bool
+print_bool:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    cmp x0, #0
+    adrp x0, fmt_false
+    add x0, x0, :lo12:fmt_false
+    adrp x1, fmt_true
+    add x1, x1, :lo12:fmt_true
+    csel x0, x1, x0, ne
+    bl printf
+    mov x0, #0
+    ldp x29, x30, [sp], #16
+    ret
+.global print_int
+print_int:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    mov x1, x0
+    adrp x0, fmt_int
+    add x0, x0, :lo12:fmt_int
+    bl printf
+    mov x0, #0
+    ldp x29, x30, [sp], #16
+    ret
+.global read
+read:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    sub sp, sp, #16
+    str xzr, [sp]
+    mov x1, sp
+    adrp x0, fmt_read
+    add x0, x0, :lo12:fmt_read
+    bl scanf
+    ldr x0, [sp]
+    add sp, sp, #16
+    ldp x29, x30, [sp], #16
+    ret
+|}
 
-let compile_code functions =
-  let declarations =
-    functions
-    |> List.map (fun (func : function_data) -> func.name)
-    |> List.append Generator.builtin_functions
-  in
-  let builtin =
-    "\n\
-     .text\n\
-     .global print_bool\n\
-     print_bool:\n\
-    \    stp fp, lr, [sp, #-16]!\n\
-    \    sub sp, sp, #16\n\
-    \    cmp w0, #0\n\
-    \    adr x0, fmt_false\n\
-    \    b.eq 1f\n\
-    \    adr x0, fmt_true\n\
-     1:\n\
-    \    bl printf\n\
-    \    mov x0, #0\n\
-    \    add sp, sp, #16\n\
-    \    ldp fp, lr, [sp], #16\n\
-    \    ret\n\n\
-     .text\n\
-     .global print_int\n\
-     print_int:\n\
-    \    stp fp, lr, [sp, #-16]!\n\
-    \    mov x19, x0\n\
-    \    adr x0, fmt_int\n\
-    \    str x19, [sp, #-16]!\n\
-    \    bl  printf\n\
-    \    mov x0, #0\n\
-    \    add sp, sp, #16\n\
-    \    ldp fp, lr, [sp], #16\n\
-    \    ret\n\n\
-     .text\n\
-     .global read\n\
-     read:\n\
-    \    stp fp, lr, [sp, #-16]!\n\
-    \    adr x0, fmt_read\n\
-    \    adr x11, num\n\
-    \    str x11, [SP, #-16]!\n\
-    \    bl scanf\n\
-    \    add sp, sp, #16\n\
-    \    adr x11, num\n\
-    \    ldr x0, [x11]\n\
-    \    ldp fp, lr, [sp], #16\n\
-    \    ret\n\n\n\
-     .data\n\n\
-     .balign 4\n\
-     fmt_true:\n\
-    \    .asciz \"true\\n\"\n\
-     .balign 4\n\
-     fmt_false:\n\
-    \    .asciz \"false\\n\"\n\
-     .balign 4\n\
-     fmt_read:\n\
-    \    .asciz \"%lld\"\n\
-     .balign 4\n\
-     fmt_int:\n\
-    \    .asciz \"%lld\\n\"\n\
-     .balign 4\n\
-     num:    .quad 0\n\
-    \      "
-  in
-  compile_functions functions declarations builtin
+let compile_code (functions : function_data list) =
+  runtime
+  ^ String.concat "\n"
+      (List.map
+         (fun ({ name; parameters; statements } : function_data) ->
+           compile_function name parameters statements)
+         functions)
+  ^ "\n.section .note.GNU-stack,\"\",%progbits\n"

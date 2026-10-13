@@ -44,7 +44,9 @@ let rec explicate_control expr name count =
       let expr, count = explicate_control expr name count in
       (List.append value expr, count)
   | Sequence (lhs, rhs) ->
-      let lhs, count = explicate_control lhs None count in
+      (* A discarded result is not a function return or a tail-call position. *)
+      let discarded = Format.sprintf "discard.%d" count in
+      let lhs, count = explicate_control lhs (Some discarded) (count + 1) in
       let rhs, count = explicate_control rhs name count in
       (List.append lhs rhs, count)
 

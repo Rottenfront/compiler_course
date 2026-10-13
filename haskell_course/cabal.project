@@ -1,0 +1,3 @@
+packages: .
+-- All dependencies are available with the installed GHC. Avoid network resolution.
+active-repositories: :none

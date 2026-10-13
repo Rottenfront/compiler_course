@@ -213,7 +213,7 @@ let rec parse_expr (in_function : bool) (position : position) : expr_node parser
   in
 
   let* lhs =
-    parse_parenth position <|> parse_literal position
+    parse_unit position <|> parse_parenth position <|> parse_literal position
     <|>
     if in_function then parse_ident position
     else parse_let position <|> parse_if position <|> parse_function position
@@ -253,18 +253,22 @@ let rec distribute_operator (expr : expr_node) =
       (* there is no way for rhs to have any more elements *)
     else
       let rec split_by_level lhs prev_rhs
-          (next_rhs : (operator * expr_node) list) level =
+          (next_rhs : (operator * expr_node) list) =
         match next_rhs with
-        | [] -> distribute_level lhs (List.rev prev_rhs) (level - 1)
+        | [] -> (distribute_level lhs (List.rev prev_rhs) (level - 1), [])
         | (operator, expr) :: rest ->
             if operator_level operator.type_ = level then
               let l = distribute_level lhs (List.rev prev_rhs) (level - 1) in
-              let r = split_by_level expr [] rest level in
-              let position = extend_span l.position r.position in
-              { value = TmOpApp { lhs = l; operator; rhs = r }; position }
-            else split_by_level lhs ((operator, expr) :: prev_rhs) rest level
+              let r, following = split_by_level expr [] rest in
+              (l, (operator, r) :: following)
+            else split_by_level lhs ((operator, expr) :: prev_rhs) rest
       in
-      split_by_level lhs [] rhs level
+      let first, following = split_by_level lhs [] rhs in
+      List.fold_left
+        (fun (lhs : expr_node) (operator, (rhs : expr_node)) ->
+          let position = extend_span lhs.position rhs.position in
+          { value = TmOpApp { lhs; operator; rhs }; position })
+        first following
   in
   let value =
     match expr.value with
@@ -474,5 +478,5 @@ let rec parse_stmts position funcs =
   let res, rest = parse_func position tokens in
   match res with
   | Ok res -> parse_stmts res.position (res :: funcs) rest
-  | Error (NoFunction _) -> return funcs rest
+  | Error (NoFunction _) when List.is_empty tokens -> return funcs rest
   | Error err -> fail err rest

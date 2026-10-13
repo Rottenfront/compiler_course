@@ -1,13 +1,14 @@
 open Lexer
 open Utils
 
-type literal = LitNumber of int | LitBool of bool
+type literal = LitNumber of int | LitBool of bool | LitUnit
 
 let print_literal literal =
   match literal with
   | LitNumber number -> string_of_int number
   | LitBool true -> "true"
   | LitBool false -> "false"
+  | LitUnit -> "()"
 
 type operator_type =
   | OpAdd
@@ -72,8 +73,8 @@ let rec equal_type lhs rhs =
   | TyFunc (params, res) -> (
       match rhs.type_value with
       | TyFunc (r_params, r_res) ->
-          List.combine params r_params
-          |> List.for_all (fun (lhs, rhs) -> equal_type lhs rhs)
+          List.length params = List.length r_params
+          && List.for_all2 equal_type params r_params
           && equal_type res r_res
       | _ -> false)
 
@@ -289,3 +290,19 @@ let expect_number ~on_empty ~on_unexpected : (int * position) parser =
       (Error (NoPossibleExpression pos), tokens)
   | Error (NoPossibleType pos), _ -> (Error (NoPossibleExpression pos), tokens)
   | other -> other
+
+let parse_unit position : expr_node parser =
+ fun tokens ->
+  match tokens with
+  | { type_ = TkParenOpen; position = start }
+    :: { type_ = TkParenClose; position = finish }
+    :: rest
+  | { type_ = TkBracketOpen; position = start }
+    :: { type_ = TkBracketClose; position = finish }
+    :: rest
+  | { type_ = TkBraceOpen; position = start }
+    :: { type_ = TkBraceClose; position = finish }
+    :: rest ->
+      ( Ok { value = TmLiteral LitUnit; position = extend_span start finish },
+        rest )
+  | _ -> error_no_possible_expression position tokens

@@ -100,6 +100,13 @@ let lexer source_language (input : string) : token list =
   let rec aux line pos input =
     match input with
     | [] -> []
+    | '-' :: digit :: rest
+      when source_language = Config.Racket && is_digit digit ->
+        let number, new_pos, cs =
+          lex_number (pos + 1) [ '-' ] (digit :: rest)
+        in
+        let position = ({ line; char = pos }, { line; char = new_pos }) in
+        { type_ = TkNumber number; position } :: aux line new_pos cs
     | '\n' :: rest -> aux (line + 1) 0 rest
     | c :: rest when is_whitespace c -> aux line (pos + 1) rest
     | c :: rest when is_special_char c ->
@@ -134,7 +141,7 @@ let lexer source_language (input : string) : token list =
           match ident with
           | "let" -> TkLet
           | "if" -> TkIf
-          | "define" -> TkDefine
+          | "define" | "func" -> TkDefine
           | ident -> (
               match source_language with
               | Config.Lama -> (
@@ -151,8 +158,8 @@ let lexer source_language (input : string) : token list =
               | Config.Racket -> (
                   match ident with
                   | "begin" -> TkBegin
-                  | "#t" -> TkTrue
-                  | "#f" -> TkFalse
+                  | "#t" | "true" -> TkTrue
+                  | "#f" | "false" -> TkFalse
                   | ident -> TkIdent ident))
         in
         { type_; position } :: aux line new_pos cs

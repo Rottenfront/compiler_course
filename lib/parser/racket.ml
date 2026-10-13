@@ -176,8 +176,15 @@ let rec parse_expr (position : position) : expr_node parser =
             }
     in
     let* name =
-      expect_ident ~on_empty:(error_no_possible_expression position)
-        ~on_unexpected:(fun _ -> error_no_possible_expression position)
+     fun tokens ->
+      match tokens with
+      | { type_ = TkBegin; position } :: rest ->
+          (Ok { str = "begin"; position }, rest)
+      | _ ->
+          expect_ident
+            ~on_empty:(error_no_possible_expression position)
+            ~on_unexpected:(fun _ -> error_no_possible_expression position)
+            tokens
     in
     let* result = parse_arguments name [] name.position in
     return (result, result.position)
@@ -224,8 +231,8 @@ let rec parse_expr (position : position) : expr_node parser =
   in
 
   let parse_basic_expr (position : position) : expr_node parser =
-    parse_true position <|> parse_false position <|> parse_number position
-    <|> parse_ident position
+    parse_unit position <|> parse_true position <|> parse_false position
+    <|> parse_number position <|> parse_ident position
   in
 
   parse_basic_expr position
@@ -460,5 +467,5 @@ let rec parse_stmts position funcs =
   let res, rest = parse_in error_no_function parse_func position tokens in
   match res with
   | Ok (res, position) -> parse_stmts position (res :: funcs) rest
-  | Error (NoFunction _) -> return funcs rest
+  | Error (NoFunction _) when List.is_empty tokens -> return funcs rest
   | Error err -> fail err rest

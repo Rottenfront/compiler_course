@@ -1,3 +1,5 @@
 (test
  (name test_compiler_course)
+ ; Stage fixtures automatically in the build directory and test sandbox.
+ (deps (source_tree samples))
  (libraries CompilerCourse alcotest))
